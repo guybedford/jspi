@@ -12,15 +12,51 @@ run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clin
 
 [[task]]
 name = 'test'
-deps = ['test:debug', 'test:release', 'test:proof', 'test:exit-runtime', 'test:no-jspi', 'test:two-instance']
+deps = [
+    'test:debug',
+    'test:release',
+    'test:proof',
+    'test:panic-fatal',
+    'test:exit-runtime',
+    'test:no-jspi',
+    'test:two-instance',
+]
 
+# debug is load-bearing: -O0 spills all locals — the worst case for the
+# save-state transit kernel
 [[task]]
 name = 'test:debug'
-run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo test --features metrics'
+run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo test'
 
 [[task]]
 name = 'test:release'
 run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo test --release'
+
+# prove the corruption test bites: with virtualization disabled it must fail
+[[task]]
+name = 'test:proof'
+run = '''
+export CARGO_TARGET_DIR=target/no-virtualize
+export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH --cfg jspi_disable_virtualization"
+cargo test --test corruption --no-run || exit 1
+if cargo test --test corruption 2>/dev/null; then
+  echo "ERROR: corruption test passed with virtualization disabled" && exit 1
+else
+  echo "corruption test bites (failed as expected with virtualization disabled)"
+fi
+'''
+
+# an escaped fiber panic is fatal and loud: non-zero exit after main completed
+[[task]]
+name = 'test:panic-fatal'
+run = '''
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo build --example panic_fatal || exit 1
+if out=$(node target/wasm32-unknown-emscripten/debug/examples/panic_fatal.js 2>&1); then
+  echo "ERROR: escaped fiber panic exited 0" && exit 1
+fi
+echo "$out" | grep -q marker:main-done || { echo "ERROR: main did not complete"; exit 1; }
+echo "panic-fatal ok"
+'''
 
 # fibers parked at main-return must complete before the runtime exits
 [[task]]
@@ -32,7 +68,7 @@ echo "$out" | grep -q marker:fiber-done || { echo "ERROR: fiber did not complete
 echo "exit-runtime keepalive ok"
 '''
 
-# without -sJSPI: linked() false, suspend panics cleanly, nothing else breaks
+# without -sJSPI: linked() false, stack_root works, no-op bracket degrades
 [[task]]
 name = 'test:no-jspi'
 run = '''
@@ -47,18 +83,4 @@ name = 'test:two-instance'
 run = '''
 CARGO_TARGET_DIR=target/two-instance CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH -Clink-arg=-sMODULARIZE" cargo build --example two_instance || exit 1
 node scripts/two_instance_driver.cjs target/two-instance/wasm32-unknown-emscripten/debug/examples/two_instance.js
-'''
-
-# prove the corruption test bites: with virtualization disabled it must fail
-[[task]]
-name = 'test:proof'
-run = '''
-export CARGO_TARGET_DIR=target/no-virtualize
-export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH --cfg jspi_disable_virtualization"
-cargo test --test corruption --no-run || exit 1
-if cargo test --test corruption 2>/dev/null; then
-  echo "ERROR: corruption test passed with virtualization disabled" && exit 1
-else
-  echo "corruption test bites (failed as expected with virtualization disabled)"
-fi
 '''

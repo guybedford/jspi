@@ -1,6 +1,0 @@
-[build]
-target = "wasm32-unknown-emscripten"
-
-[target.wasm32-unknown-emscripten]
-runner = "node"
-rustflags = ["-C", "link-args=-sJSPI"]

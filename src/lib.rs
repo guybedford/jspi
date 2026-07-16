@@ -1,70 +1,63 @@
-//! Shared JSPI spill-stack model primitives.
+//! JSPI spill-stack primitives for `wasm32-unknown-emscripten`: safe
+//! blocking calls to async JavaScript from Rust, without stack corruption.
 //!
-//! JSPI (`WebAssembly.Suspending` / `WebAssembly.promising`) switches the
-//! engine-managed native wasm stack per activation, but knows nothing about
-//! the LLVM spill stack ("shadow stack") in linear memory. All activations
-//! share one spill-stack region and one `__stack_pointer` global, so
-//! concurrently suspended activations silently corrupt each other.
+//! JSPI (`WebAssembly.Suspending` / `WebAssembly.promising`) suspends the
+//! engine-managed native wasm stack per activation. LLVM-compiled code also
+//! uses a spill ("shadow") stack in linear memory through the
+//! `__stack_pointer` global, which JSPI knows nothing about: concurrently
+//! suspended activations share one spill stack and one stack pointer, and
+//! silently corrupt each other unless every suspension saves its live slice
+//! and every resumption restores it.
 //!
-//! This crate implements the eager slice-virtualization convention:
-//! every suspension saves its own live spill slice `[sp, top)`, and every
-//! resumption restores that slice and the stack pointer *at the true resume
-//! boundary* (wasm-initiated, immediately after the suspending import
-//! returns). Under this discipline arbitrary interleavings, non-LIFO wake
-//! orders, and even overlapping slices are correct: whatever a sibling
-//! scribbles or stale-restores into your range while you are suspended, your
-//! own resume-restore heals before you run, and only one activation runs at
-//! a time.
+//! This crate is that eager save/restore convention reduced to primitives.
+//! **The foreign call is the Suspending thing** — consumers declare their
+//! own async imports (the `__asyncjs__` name prefix under `-sJSPI`) and call
+//! them directly through [`blocking_call`]; the crate supplies only the
+//! stack discipline that makes this sound.
 //!
-//! Soundness invariants encoded here (do not weaken):
+//! ```ignore
+//! // in a promising-entered function (glue entry, or main itself —
+//! // -sJSPI auto-wraps main):
+//! jspi::spawn(|| {
+//!     // ordinary Rust; blocking_call parks this activation until the
+//!     // import's promise settles
+//!     jspi::blocking_call(glue_fetch, (url_ptr as usize, url_len));
+//!     let result = glue_take_result(); // plain import, post-restore
+//! })
+//! ```
 //!
-//! 1. The save is synchronous with the suspend: it happens before the
-//!    suspending import is called, so nothing can interleave.
-//! 2. The restore is initiated from wasm after the suspending import
-//!    returns. Restoring from the JS continuation is unsound: the engine
-//!    resumes the wasm activation on a later tick, so another activation's
-//!    restore can interleave and clobber the stack pointer or slice.
-//! 3. The save id round-trips through the suspending import's *return
-//!    channel*. Post-resume, pre-restore, the activation's own spill frame
-//!    may hold sibling scribbles, so no value read from memory written
-//!    before the suspension may be trusted. Engine-delivered values (wasm
-//!    locals, return values) are safe.
-//! 4. [`restore_stack`] is `#[inline(always)]` and must be called with
-//!    nothing between the suspending import returning and the call. A
-//!    non-inlined callee would allocate its frame at the stale stack
-//!    pointer and its epilogue would rewrite the stack pointer after the
-//!    restore fixed it.
-//! 5. The suspending import must never throw into the resume boundary:
-//!    unwinding before the restore would run landing pads against a
-//!    scribbled, un-restored stack. Rejections are recorded JS-side and
-//!    signalled through the id's high bit; [`suspend`] surfaces them as
-//!    `Err` only after the restore completes.
-//!
-//! The activation *top* is tracked in a shared thread-local so that
-//! independent JSPI integrations (wasm-bindgen, tokio, hand-written glue)
-//! linking this crate agree on exact slice extents; without sharing, a
-//! suspender that did not create the current activation would have to save
-//! conservatively up to the stack base.
+//! **Healing invariant** (the correctness core): with eager save at every
+//! suspension and eager restoration at every resumption, arbitrary
+//! interleavings, non-LIFO wake orders, and overlapping activation ranges
+//! are correct. Whatever a sibling scribbles into a parked slice, the
+//! owner's own restore undoes before its code runs; only one activation
+//! executes at a time (resumes fire only from an empty native stack).
+
+#[cfg(all(target_os = "emscripten", target_feature = "atomics"))]
+compile_error!(
+    "jspi is incompatible with -pthread / target_feature=atomics: \
+     JSPI activations share one real thread"
+);
+
+mod args;
+pub use args::BlockingArgs;
 
 #[cfg(target_os = "emscripten")]
 mod emscripten;
-
 #[cfg(target_os = "emscripten")]
-pub use emscripten::*;
+pub use emscripten::{blocking_call, linked, spawn, stack_root};
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
-
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::*;
+pub use unsupported::{blocking_call, linked, spawn, stack_root};
 
-/// Padding for [`wasm_enter`], covering the promising entry's own frame
-/// between its true entry stack pointer and the measurement point inside its
-/// body. Overshoot above the true top is safe under the healing invariant
-/// (over-saved bytes belong to a suspended ancestor, which re-heals them at
-/// its own resume, or are dead); undershoot is not. Entry wrappers must be
-/// thin enough that their frame fits in this padding, or use
-/// [`wasm_enter_exact`] with a pre-entry measurement.
+/// Padding added to the stack pointer measured inside [`stack_root`]
+/// (clamped to the stack base) to cover the promising entry's own frame
+/// between its true entry stack pointer and the measurement point.
+/// Over-save above the true top is healed by the owner's restore;
+/// under-save is corruption — entry frames (including the root closure's
+/// captures) must stay thinner than this pad.
 pub const STACK_TOP_PAD: usize = 4096;
 
 #[doc(hidden)]
@@ -89,32 +82,19 @@ pub const fn __em_js_bytes<const N: usize>(s: &str) -> [u8; N] {
 /// `$sym` must be `__em_js__<name>` (or `__em_js____asyncjs__<name>` for an
 /// import that should receive `WebAssembly.Suspending` treatment under
 /// `-sJSPI`), and `$body` the `"(args)<::>{ body }"` string. Must be used in
-/// a `lib` crate (rustc internalizes `#[no_mangle]` statics when compiling
-/// a `bin`, dropping the wasm export emscripten's metadata extraction keys
-/// on), and the static must be referenced from linked code so the archive
-/// member is pulled in.
+/// a `lib` crate (rustc internalizes `#[no_mangle]` statics when compiling a
+/// `bin`, dropping the data export emscripten's metadata extraction keys
+/// on), and the static must be referenced from linked code (an
+/// `#[inline(never)]` anchor using `black_box`) so the archive member is
+/// pulled in. Never add `#[link_section]`: rustc emits wasm custom sections,
+/// breaking extraction.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! em_js_data {
     ($sym:ident, $body:expr) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         #[used]
         pub static $sym: [u8; $crate::__em_js_len($body)] =
             $crate::__em_js_bytes::<{ $crate::__em_js_len($body) }>($body);
-    };
-}
-
-/// Shared JS-side registry prelude. Every em_js body that touches shared
-/// state starts with this. Hung off the per-instance `Module` object (in
-/// scope for em_js bodies, per-instance under MODULARIZE and module-scoped
-/// output): a `globalThis` registry would be shared across wasm instances
-/// in one JS context, and the last-initialized instance's `setSp`/`getSp`/
-/// `getTop`/`setTop` funcrefs would clobber the others' — cross-instance
-/// stack-pointer writes, i.e. memory corruption.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! jspi_js_prelude {
-    () => {
-        "const J = Module.__jspi ??= { saves: new Map(), nsave: 1, promises: new Map(), npromise: 1 };"
     };
 }

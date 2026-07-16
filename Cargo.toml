@@ -1,17 +1,13 @@
 [package]
 name = "jspi"
 version = "0.0.1"
-edition = "2021"
-description = "Shared JSPI spill-stack model primitives for WebAssembly stack switching"
+edition = "2024"
+description = "JSPI spill-stack primitives for wasm32-unknown-emscripten"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
 members = ["tests-glue"]
-
-[features]
-# copy-load counters (saves/restores, bytes out/in) via jspi::metrics()
-metrics = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(jspi_disable_virtualization)"] }
@@ -20,11 +16,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(jspi_disable_virtualizatio
 jspi-test-glue = { path = "tests-glue" }
 
 [[test]]
-name = "suspend"
+name = "corruption"
 harness = false
 
 [[test]]
-name = "corruption"
+name = "suspend"
 harness = false
 
 [[test]]

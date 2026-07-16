@@ -1,70 +1,40 @@
+//! Interleaving soundness: non-LIFO wake orders, same-tick double wakes,
+//! sequential brackets, and memory growth while parked.
+
 use std::cell::Cell;
 use std::hint::black_box;
 
-use jspi::{suspend_on, Deferred};
-use jspi_test_glue::{sleep, TestPromise};
+use jspi_test_glue::{TestPromise, await_pid, run_fiber, sleep};
 
 thread_local! {
     static DONE: Cell<u32> = const { Cell::new(0) };
 }
 
 fn done() {
-    DONE.with(|d| d.set(d.get() + 1));
-}
-
-fn done_count() -> u32 {
-    DONE.with(|d| d.get())
+    DONE.set(DONE.get() + 1);
 }
 
 fn basic() {
-    let h = jspi::spawn(|| {
+    let before = DONE.get();
+    run_fiber(|| {
         let buf = [0x5Au8; 128];
         black_box(&buf);
         sleep(10.0);
         assert_eq!(buf, [0x5Au8; 128], "basic: buffer corrupted across sleep");
-        7u32
-    });
-    assert_eq!(h.join().unwrap(), 7, "basic: join result");
-}
-
-// Two suspensions waking from the same resolution in the same microtask
-// drain: exercises restore ordering when continuations queue back-to-back.
-fn same_tick_double_wake() {
-    let before = done_count();
-    let p = TestPromise::new();
-    let shared_pid = p.share();
-    let _ = jspi::spawn(move || {
-        let buf = [0xA1u8; 200];
-        black_box(&buf);
-        p.wait().unwrap();
-        assert_eq!(buf, [0xA1u8; 200], "same-tick: fiber 1 buffer corrupted");
         done();
     });
-    let _ = jspi::spawn(move || {
-        let buf = [0xB2u8; 200];
-        black_box(&buf);
-        jspi::suspend(shared_pid).unwrap();
-        assert_eq!(buf, [0xB2u8; 200], "same-tick: fiber 2 buffer corrupted");
-        done();
-    });
-    sleep(20.0); // let both park
-    p.resolve();
-    sleep(20.0);
-    assert_eq!(
-        done_count(),
-        before + 2,
-        "same-tick: fibers did not complete"
-    );
+    sleep(30.0);
+    assert_eq!(DONE.get(), before + 1, "basic: fiber did not complete");
 }
 
-fn recurse(depth: u8, park: &Deferred) {
+fn recurse(depth: u8, park_pid: u32) {
     let mut buf = [0u8; 64];
     buf.fill(depth ^ 0xC3);
     black_box(&mut buf);
     if depth == 0 {
-        suspend_on(park).unwrap();
+        await_pid(park_pid);
     } else {
-        recurse(depth - 1, park);
+        recurse(depth - 1, park_pid);
     }
     assert_eq!(
         buf,
@@ -74,83 +44,87 @@ fn recurse(depth: u8, park: &Deferred) {
 }
 
 // X parks deep, Y (below X) parks deep after it, then wakes and completes
-// first; Z then occupies and scribbles the same region; X wakes last and
-// asserts every frame on unwind. Wake order is unrelated to suspend order.
+// first; Z then re-occupies and scribbles the same region; X wakes last and
+// asserts every frame on unwind. Wake order is unrelated to park order.
 fn non_lifo() {
-    let before = done_count();
-    let dx = Deferred::new(None);
-    let dy = Deferred::new(None);
-    let dz = Deferred::new(None);
-    let (cx, cy, cz) = (dx.clone(), dy.clone(), dz.clone());
-    let _ = jspi::spawn(move || {
-        recurse(8, &cx);
+    let before = DONE.get();
+    let px = TestPromise::new();
+    let py = TestPromise::new();
+    let pz = TestPromise::new();
+    run_fiber(move || {
+        recurse(8, px.0);
         done();
     });
-    let _ = jspi::spawn(move || {
-        recurse(8, &cy);
+    run_fiber(move || {
+        recurse(8, py.0);
         done();
     });
     sleep(20.0); // X and Y parked at depth 0
-    dy.resolve();
+    py.resolve();
     sleep(10.0); // Y unwound and completed
-    let _ = jspi::spawn(move || {
-        recurse(12, &cz);
+    run_fiber(move || {
+        recurse(12, pz.0);
         done();
     });
     sleep(10.0); // Z parked deep in Y's (and X's) old region
-    dz.resolve();
+    pz.resolve();
     sleep(10.0); // Z unwound and completed
-    dx.resolve();
+    px.resolve();
     sleep(10.0);
-    assert_eq!(
-        done_count(),
-        before + 3,
-        "non-lifo: fibers did not complete"
-    );
+    assert_eq!(DONE.get(), before + 3, "non-lifo: fibers did not complete");
 }
 
-// Synchronous promising dispatch from a JS frame above live wasm: the entry
-// glue must save/restore the shared top, or this activation would suspend
-// with the callee's top and under-save its own frames.
-fn sandwich() {
-    let before = done_count();
-    let top_before = jspi::stack_top().expect("sandwich: no top registered");
-    let d = Deferred::new(None);
-    let dc = d.clone();
-    let buf = [0x42u8; 128];
-    black_box(&buf);
-    jspi_test_glue::sandwich_dispatch(move || {
-        let inner = [0x66u8; 128];
-        black_box(&inner);
-        suspend_on(&dc).unwrap();
-        assert_eq!(inner, [0x66u8; 128], "sandwich: callee buffer corrupted");
+// Two parked brackets waking from the same resolution in the same microtask
+// drain: exercises restore ordering across one engine resume tick (the
+// design point that killed JS-side restores).
+fn same_tick_double_wake() {
+    let before = DONE.get();
+    let p = TestPromise::new();
+    let shared_pid = p.share();
+    run_fiber(move || {
+        let buf = [0xA1u8; 200];
+        black_box(&buf);
+        p.wait();
+        assert_eq!(buf, [0xA1u8; 200], "same-tick: fiber 1 buffer corrupted");
         done();
     });
-    assert_eq!(
-        jspi::stack_top(),
-        Some(top_before),
-        "sandwich: shared top clobbered by synchronous promising dispatch"
-    );
-    sleep(10.0); // suspend with our own (restored) top
-    d.resolve();
-    sleep(10.0);
-    assert_eq!(buf, [0x42u8; 128], "sandwich: caller buffer corrupted");
-    assert_eq!(
-        done_count(),
-        before + 1,
-        "sandwich: callee did not complete"
-    );
+    run_fiber(move || {
+        let buf = [0xB2u8; 200];
+        black_box(&buf);
+        await_pid(shared_pid);
+        assert_eq!(buf, [0xB2u8; 200], "same-tick: fiber 2 buffer corrupted");
+        done();
+    });
+    sleep(20.0); // let both park
+    p.resolve();
+    sleep(20.0);
+    assert_eq!(DONE.get(), before + 2, "same-tick: fibers did not complete");
 }
 
-// Memory growth while suspended: restore must use fresh heap views.
+// 50 save/call/restore cycles in one activation with per-iteration buffers.
+fn sequential_brackets() {
+    for i in 0..50u8 {
+        let mut buf = [0u8; 96];
+        buf.fill(i ^ 0x7B);
+        black_box(&mut buf);
+        sleep(1.0);
+        assert_eq!(
+            buf,
+            [i ^ 0x7B; 96],
+            "sequential: buffer corrupted at iteration {i}"
+        );
+    }
+}
+
+// Memory growth while a sibling is parked: the restore must use fresh heap
+// views.
 fn growth() {
-    let before = done_count();
-    let d = Deferred::new(None);
-    let dc = d.clone();
-    let _ = jspi::spawn(move || {
+    let before = DONE.get();
+    let p = TestPromise::new();
+    run_fiber(move || {
         let buf = [0x7Eu8; 256];
         black_box(&buf);
-        suspend_on(&dc).unwrap();
+        p.wait();
         assert_eq!(buf, [0x7Eu8; 256], "growth: buffer corrupted across growth");
         done();
     });
@@ -158,67 +132,23 @@ fn growth() {
     let big = vec![0x11u8; 128 * 1024 * 1024];
     black_box(&big[big.len() - 1]);
     drop(big);
-    d.resolve();
+    p.resolve();
     sleep(10.0);
-    assert_eq!(done_count(), before + 1, "growth: fiber did not complete");
-}
-
-// Timeout resolution wakes a parked suspender; early resolve disarms the
-// timer (indistinguishable by design).
-fn deferred_timeout() {
-    let d = Deferred::new(Some(15.0));
-    let h = jspi::spawn(move || {
-        suspend_on(&d).unwrap(); // woken by the deadline
-        3u32
-    });
-    assert_eq!(h.join().unwrap(), 3, "timeout: fiber did not wake");
-
-    let d = Deferred::new(Some(60_000.0));
-    let dc = d.clone();
-    let h = jspi::spawn(move || {
-        suspend_on(&dc).unwrap();
-        4u32
-    });
-    sleep(10.0);
-    d.resolve(); // must clearTimeout: a pinned 60s timer would hang the run
-    assert_eq!(h.join().unwrap(), 4, "timeout: early resolve did not wake");
+    assert_eq!(DONE.get(), before + 1, "growth: fiber did not complete");
 }
 
 fn main() {
-    let _jspi_stack = jspi::wasm_enter();
-    assert!(
-        jspi::linked(),
-        "test requires -sJSPI and a JSPI-enabled host"
-    );
-    basic();
-    same_tick_double_wake();
-    non_lifo();
-    sandwich();
-    growth();
-    deferred_timeout();
-    #[cfg(feature = "metrics")]
-    {
-        let m = jspi::metrics();
+    // the safe full-capture root as the outermost activation root
+    jspi::spawn(|| {
         assert!(
-            m.saves > 0 && m.saves == m.restores,
-            "metrics: unbalanced save/restore: {m:?}"
+            jspi::linked(),
+            "test requires -sJSPI and a JSPI-enabled host"
         );
-        assert!(
-            m.saved_bytes > 0 && m.saved_bytes == m.restored_bytes,
-            "metrics: unbalanced bytes: {m:?}"
-        );
-        println!(
-            "metrics: {} suspensions, {} bytes copied each way (avg {} bytes/slice)",
-            m.saves,
-            m.saved_bytes,
-            m.saved_bytes / m.saves
-        );
-        jspi::reset_metrics();
-        assert_eq!(
-            jspi::metrics(),
-            jspi::Metrics::default(),
-            "metrics: reset failed"
-        );
-    }
-    println!("suspend tests passed");
+        basic();
+        non_lifo();
+        same_tick_double_wake();
+        sequential_brackets();
+        growth();
+        println!("suspend tests passed");
+    })
 }

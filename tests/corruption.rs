@@ -1,17 +1,21 @@
-//! Port of Hood Chatham's reentrancy corruption reproduction: a victim's
-//! suspended frames survive a sibling exiting above it (resetting the stack
-//! pointer) and a plain activation scribbling down through its live range.
-//! Must fail when built with --cfg jspi_disable_virtualization.
+//! Port of Hood Chatham's reentrancy corruption reproduction: fiber A
+//! parks briefly above; fiber V writes a recognizable buffer and parks long;
+//! A resumes and completes (its epilogues walk SP back above V); a plain
+//! callback then scribbles a large frame down through V's live range; V
+//! resumes and asserts its buffer. Must fail when built with
+//! `--cfg jspi_disable_virtualization` (the proof lane).
 
 use std::cell::Cell;
 use std::hint::black_box;
 
-use jspi::{suspend_on, Deferred};
-use jspi_test_glue::{call_plain_later, sleep};
+use jspi_test_glue::{TestPromise, await_pid, call_plain_later, run_fiber, run_fiber_full, sleep};
 
 thread_local! {
     static VICTIM_OK: Cell<bool> = const { Cell::new(false) };
+    static FAT_VICTIM_OK: Cell<bool> = const { Cell::new(false) };
 }
+
+const VICTIM_DATA: &[u8; 55] = b"victim's important string / victim's important string!!";
 
 fn scribble() {
     let mut junk = [0xEEu8; 16 * 1024];
@@ -19,45 +23,57 @@ fn scribble() {
 }
 
 fn main() {
-    let _jspi_stack = jspi::wasm_enter();
-    assert!(
-        jspi::linked(),
-        "test requires -sJSPI and a JSPI-enabled host"
-    );
+    unsafe {
+        jspi::stack_root(|| {
+            assert!(
+                jspi::linked(),
+                "test requires -sJSPI and a JSPI-enabled host"
+            );
 
-    let d_above = Deferred::new(None);
-    let d_victim = Deferred::new(None);
-    let (ca, cv) = (d_above.clone(), d_victim.clone());
+            let above = TestPromise::new();
+            let victim = TestPromise::new();
+            let fat_victim = TestPromise::new();
 
-    // occupies the region just below main's suspend point, then exits,
-    // leaving the stack pointer above the victim
-    let _ = jspi::spawn(move || {
-        let pad = [0x44u8; 16];
-        black_box(&pad);
-        suspend_on(&ca).unwrap();
-    });
+            // occupies the region just below main's park point, then exits,
+            // leaving the stack pointer reset above the victim
+            run_fiber(move || {
+                let pad = [0x44u8; 16];
+                black_box(&pad);
+                await_pid(above.0);
+            });
 
-    // parks below `above` with a recognizable buffer
-    let _ = jspi::spawn(move || {
-        let buf = *b"victim's important string / victim's important string!!";
-        black_box(&buf);
-        suspend_on(&cv).unwrap();
-        assert_eq!(
-            &buf[..],
-            b"victim's important string / victim's important string!!",
-            "victim stack corrupted"
-        );
-        VICTIM_OK.with(|v| v.set(true));
-    });
+            // parks below `above` with a recognizable buffer
+            run_fiber(move || {
+                let buf = *VICTIM_DATA;
+                black_box(&buf);
+                await_pid(victim.0);
+                assert_eq!(&buf[..], &VICTIM_DATA[..], "victim stack corrupted");
+                VICTIM_OK.set(true);
+            });
 
-    sleep(10.0); // both parked
-    d_above.resolve();
-    sleep(10.0); // `above` exited; stack pointer reset above victim
-    call_plain_later(scribble);
-    sleep(10.0); // scribbler ran down through the victim's live range
-    d_victim.resolve();
-    sleep(10.0);
+            // same geometry on the safe full-capture root, through a fat
+            // (> STACK_TOP_PAD) trampoline entry frame the scribbler runs
+            // down through
+            run_fiber_full(move || {
+                let buf = *VICTIM_DATA;
+                black_box(&buf);
+                await_pid(fat_victim.0);
+                assert_eq!(&buf[..], &VICTIM_DATA[..], "fat victim stack corrupted");
+                FAT_VICTIM_OK.set(true);
+            });
 
-    assert!(VICTIM_OK.with(|v| v.get()), "victim did not complete");
-    println!("corruption test passed");
+            sleep(10.0); // all parked
+            above.resolve();
+            sleep(10.0); // `above` exited; SP reset above the victims
+            call_plain_later(scribble);
+            sleep(10.0); // scribbler ran down through the victims' live ranges
+            victim.resolve();
+            fat_victim.resolve();
+            sleep(10.0);
+
+            assert!(VICTIM_OK.get(), "victim did not complete");
+            assert!(FAT_VICTIM_OK.get(), "fat victim did not complete");
+            println!("corruption test passed");
+        })
+    }
 }
