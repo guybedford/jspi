@@ -5,24 +5,25 @@ calls to async JavaScript from Rust, without stack corruption.
 
 Experimental; not published.
 
-## The problem
+## The Problem
 
 JSPI (`WebAssembly.Suspending` / `WebAssembly.promising`) suspends the
 engine-managed native wasm stack per activation. LLVM-compiled code also
 uses a spill ("shadow") stack in linear memory through the `__stack_pointer`
-global, which JSPI knows nothing about: concurrently suspended activations
-share one spill stack and one stack pointer, and silently corrupt each
-other. The corruption needs two or more suspended activations interleaving
-non-LIFO — single-suspension programs are accidentally safe, which is why
-naive JSPI appears to work.
+global, which JSPI knows nothing about. This can cause silent stack corruption.
 
-The scheme here is Hood Chatham's eager save/restore convention
-[Integrating JSPI with the WebAssembly C Runtime](https://blog.pyodide.org/posts/jspi-with-c-runtime/)
-reduced to primitives: every suspension saves its live stack slice to the
-heap, every resumption restores it, wasm-initiated at the true resume
-boundary. **The foreign call is the Suspending thing** — you declare your
-own async imports and call them directly; the crate supplies only the stack
-discipline that makes this sound.
+See Hood Chatham's blog post on this topic for more information -
+[Integrating JSPI with the WebAssembly C Runtime](https://blog.pyodide.org/posts/jspi-with-c-runtime/).
+
+We adopt Chatham's solution with safe Rust primitives here to provide
+the following invariants:
+
+1. A `jspi::blocking_call(foreign_suspending_fn, (args,...,))` which will
+  handle storing and restoring the stack around a blocking JSPI foreign JS
+  function, including safe support for unwinds.
+2. A `jspi::spawn(|| {})` context which asserts `'static + Send`, so that
+  we know mutable borrows are not held outside JSPI stack range across
+  suspension points.
 
 ## Usage
 
@@ -31,18 +32,21 @@ discipline that makes this sound.
 // -sJSPI auto-wraps main):
 jspi::spawn(|| {
     // ordinary Rust; blocking_call parks this activation until the
-    // import's promise settles
+    // import's promise settles.
     jspi::blocking_call(glue_fetch, (url_ptr as usize, url_len));
-    let result = glue_take_result(); // plain import, post-restore
 })
 ```
 
 Link with `-C link-args=-sJSPI`. Run on a JSPI-enabled host (Node ≥ 26).
 
+## Caveats
+
+* 
+
 ## API
 
 ```rust
-pub fn spawn<R>(f: impl FnOnce() -> R) -> R;               // safe, full capture
+pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R; // safe, full capture
 pub unsafe fn stack_root<R>(f: impl FnOnce() -> R) -> R;   // optimized, marked top
 pub fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A);  // safe
 pub fn linked() -> bool;             // -sJSPI + host support probe
@@ -55,9 +59,12 @@ activation's stack extent and run the closure immediately. Every
 suspending import), and restores slice and stack pointer when it returns.
 
 - `spawn` captures from the save point to the absolute stack base. Nothing
-  can be under-saved, so it has no contract: any placement, any call depth,
-  fat frames welcome. Cost is `O(sp → base)` bytes copied per park
-  (bounded by `-sSTACK_SIZE`).
+  can be under-saved, so it has no placement contract: any call depth, fat
+  frames welcome. Its `Send + 'static` bound enforces capture discipline —
+  no borrow from outside the JSPI-managed stack range can be held across a
+  suspension point (borrows created inside the scope are within the
+  captured range and heal with everything else). Cost is `O(sp → base)`
+  bytes copied per park (bounded by `-sSTACK_SIZE`).
 - `stack_root` captures only up to a mark measured at the root
   (`SP + STACK_TOP_PAD`, clamped to the base) — `O(live slice)` copies.
   Unsafe contract: it must be the first statement of the

@@ -271,10 +271,8 @@ pub fn run_fiber_full(f: impl FnOnce() + Send + 'static) {
         let mut pad = [0u8; 2 * jspi::STACK_TOP_PAD];
         pad.fill(0x6C);
         std::hint::black_box(&mut pad);
-        jspi::spawn(|| {
-            let f = unsafe { Box::from_raw(data as *mut Box<dyn FnOnce() + Send>) };
-            f();
-        });
+        let f = unsafe { Box::from_raw(data as *mut Box<dyn FnOnce() + Send>) };
+        jspi::spawn(|| f());
         assert_eq!(
             pad,
             [0x6Cu8; 2 * jspi::STACK_TOP_PAD],

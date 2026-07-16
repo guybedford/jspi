@@ -113,6 +113,11 @@ fn enter_root<R>(top: usize, f: impl FnOnce() -> R) -> R {
 /// heals the stale rewrite) or to dead frames (harmless) — the same
 /// healing invariant, applied conservatively.
 ///
+/// The `Send + 'static` bound asserts capture discipline: no borrow from
+/// outside the JSPI-managed stack range can be held across suspension
+/// points inside the scope (borrows created within it are inside the
+/// captured range and heal with everything else).
+///
 /// The price is copy volume: `O(sp → stack base)` bytes per park, both
 /// directions (bounded by `-sSTACK_SIZE`), instead of `stack_root`'s
 /// `O(live activation slice)`.
@@ -123,7 +128,7 @@ fn enter_root<R>(top: usize, f: impl FnOnce() -> R) -> R {
 /// `ThreadId` and one set of `thread_local!` instances — treat a bracketed
 /// foreign call as a blocking syscall on a thread that shares TLS and
 /// thread identity with every other activation.
-pub fn spawn<R>(f: impl FnOnce() -> R) -> R {
+pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
     anchor();
     enter_root(unsafe { emscripten_stack_get_base() }, f)
 }
