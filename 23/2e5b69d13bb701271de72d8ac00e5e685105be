@@ -1,0 +1,27 @@
+examples/exit_runtime.rs
+  s_470e64559584d2::t_a0a7b4872b277d 8-15
+examples/no_jspi.rs
+  s_470e64559584d2::t_d7d974b9dd41bf 2-3,11-21
+examples/panic_fatal.rs
+  s_470e64559584d2::t_171c53dee9b39e 8-15
+examples/two_instance.rs
+  s_470e64559584d2::t_817c30eda42de1 12-15,17-26
+tests/panics.rs
+  s_470e64559584d2::t_a8bc802334b481 20-21,25,27,200,204,206-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "232e5b69d13bb701271de72d8ac00e5e685105be",
+  "prompts": {},
+  "sessions": {
+    "s_470e64559584d2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_09721ee3fffenI5pKH1hEJtmKF",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Guy Bedford <gbedford@cloudflare.com>"
+    }
+  }
+}
