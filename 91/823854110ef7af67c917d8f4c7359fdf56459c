@@ -1,0 +1,21 @@
+tests/panics.rs
+  s_7ea832ac2f10b7::t_f898c6dfc4282f 1-200
+tests/suspend.rs
+  s_7ea832ac2f10b7::t_52754d3a09d6e5 1-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "91823854110ef7af67c917d8f4c7359fdf56459c",
+  "prompts": {},
+  "sessions": {
+    "s_7ea832ac2f10b7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0987fcf5dffeDnVD7OH1NQHPwI",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Guy Bedford <gbedford@cloudflare.com>"
+    }
+  }
+}
