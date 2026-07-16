@@ -34,12 +34,12 @@ pub use args::BlockingArgs;
 #[cfg(target_os = "emscripten")]
 mod emscripten;
 #[cfg(target_os = "emscripten")]
-pub use emscripten::{blocking_call, enter_promising, linked};
+pub use emscripten::{blocking_call, enter_promising};
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::{blocking_call, enter_promising, linked};
+pub use unsupported::{blocking_call, enter_promising};
 
 #[doc(hidden)]
 pub const fn __em_js_len(s: &str) -> usize {

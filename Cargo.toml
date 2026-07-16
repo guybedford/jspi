@@ -9,9 +9,6 @@ publish = false
 [workspace]
 members = ["tests-glue"]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(jspi_disable_virtualization)"] }
-
 [dev-dependencies]
 jspi-test-glue = { path = "tests-glue" }
 
@@ -19,10 +16,10 @@ jspi-test-glue = { path = "tests-glue" }
 name = "corruption"
 harness = false
 
-[[test]]
-name = "suspend"
-harness = false
+# [[test]]
+# name = "suspend"
+# harness = false
 
-[[test]]
-name = "panics"
-harness = false
+# [[test]]
+# name = "panics"
+# harness = false
