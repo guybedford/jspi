@@ -1,0 +1,21 @@
+tests-glue/src/lib.rs
+  s_470e64559584d2::t_483e6f06ce463d 181,188
+tests/panics.rs
+  s_470e64559584d2::t_1088d72565262d 29,40,47,73,204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f76d99658ee8bcd818f49bef5d3f43fa8c481ed3",
+  "prompts": {},
+  "sessions": {
+    "s_470e64559584d2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_09721ee3fffenI5pKH1hEJtmKF",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Guy Bedford <gbedford@cloudflare.com>"
+    }
+  }
+}
