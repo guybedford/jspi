@@ -2,9 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::mem::MaybeUninit;
 use std::ptr;
 
-use crate::{BlockingArgs, STACK_TOP_PAD};
-
-const SENTINEL: usize = 0;
+use crate::BlockingArgs;
 
 /// Save-state for one parked bracket. Lives on the heap inside the static
 /// registry: statics and heap are never part of any saved slice, so both
@@ -12,18 +10,14 @@ const SENTINEL: usize = 0;
 struct Meta {
     sp: usize,
     len: usize,
-    top: usize,
     buf: Box<[MaybeUninit<u8>]>,
 }
 
 thread_local! {
     /// Parity counter: every parked activation holds root + bracket
-    /// = +2, so parity always describes the running code. Even: `stack_root`
+    /// = +2, so parity always describes the running code. Even: `spawn`
     /// permitted. Odd: `blocking_call` permitted.
     static COUNTER: Cell<usize> = const { Cell::new(0) };
-    /// The running activation's stack top, written by `stack_root`, written
-    /// back per-activation by each bracket's restore.
-    static TOP: Cell<usize> = const { Cell::new(SENTINEL) };
     /// Parked bracket save-state, keyed by the bracket's frame-derived
     /// probe address.
     static REGISTRY: RefCell<Vec<(usize, Meta)>> = const { RefCell::new(Vec::new()) };
@@ -124,10 +118,14 @@ fn enter_root<R>(top: usize, f: impl FnOnce() -> R) -> R {
 ///
 /// A synchronous scope, not a scheduler: runs `f` immediately. Parking in
 /// a non-promising activation still traps at the engine (fatal and loud,
-/// never corruption). Residual to know about: all activations share one
-/// `ThreadId` and one set of `thread_local!` instances — treat a bracketed
-/// foreign call as a blocking syscall on a thread that shares TLS and
-/// thread identity with every other activation.
+/// never corruption). `Send + 'static` are the safety properties: the
+/// closure's environment can hold no borrows, so nothing reachable from a
+/// suspended activation can be aliased by code the host runs during the
+/// suspension (reentrant roots, plain callbacks) — the threads framing,
+/// type-enforced at the safe entry. Residual to know about: all
+/// activations share one `ThreadId` and one set of `thread_local!`
+/// instances — treat a bracketed foreign call as a blocking syscall on a
+/// thread that shares TLS and thread identity with every other activation.
 pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
     anchor();
     enter_root(unsafe { emscripten_stack_get_base() }, f)
