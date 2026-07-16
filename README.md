@@ -17,7 +17,7 @@ non-LIFO — single-suspension programs are accidentally safe, which is why
 naive JSPI appears to work.
 
 The scheme here is Hood Chatham's eager save/restore convention
-("Integrating JSPI with the WebAssembly C Runtime", Pyodide blog, 2025-07)
+[Integrating JSPI with the WebAssembly C Runtime](https://blog.pyodide.org/posts/jspi-with-c-runtime/)
 reduced to primitives: every suspension saves its live stack slice to the
 heap, every resumption restores it, wasm-initiated at the true resume
 boundary. **The foreign call is the Suspending thing** — you declare your
