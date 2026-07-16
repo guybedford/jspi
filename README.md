@@ -106,6 +106,13 @@ runs at its resume. Under eager save and eager restore, arbitrary
 interleavings, non-LIFO wake orders, and overlapping slices are all
 correct.
 
+This also covers `&mut` held across a park: the machinery never touches
+heap memory (only `[sp, top)` stack bytes), and every stack write it makes
+is value-preserving at every point the owning activation executes — a
+restore rewrites exactly the bytes the owner's borrows last observed, and
+sibling writes land only while the owner is parked, healed before its next
+instruction. No borrow can ever observe a changed referent.
+
 ## Writing glue
 
 `tests-glue` is a reference consumer: fiber dispatch through a
@@ -150,9 +157,6 @@ Delivery notes (empirically established):
   across it that you would not hold across `epoll_wait`. `RefCell` guards
   held across a park fail loud; identity-keyed reentrancy
   (`parking_lot::ReentrantMutex`) is unsound in dependent code.
-- The restore writes memory behind live `&mut` borrows (byte-identical or
-  healed) — observationally correct, formally the same class as
-  emscripten's long-shipped ASYNCIFY.
 - Cooperative only: a compute-bound activation starves the loop.
 - Relies on emscripten internals (`Asyncify.handleAsync`, `wasmExports`,
   `HEAPU8`, `_emscripten_stack_restore`, keepalive hooks); validated
