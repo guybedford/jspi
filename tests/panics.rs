@@ -26,7 +26,7 @@ fn parity_denial() {
         "parity: expected nested activation scope to panic"
     );
     // a bracket inside the scope (even under catch_unwind) is legal
-    let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
+    let r = catch_unwind(|| unsafe { jspi::blocking_call(glue_sleep, (1.0,)) });
     assert!(r.is_ok(), "parity: bracket inside scope should work");
     sleep(1.0);
 }
@@ -37,14 +37,14 @@ fn parity_denial() {
 // identical bytes and rebalances parity — catchable, frames intact, system
 // fully operational.
 extern "C-unwind" fn reentrant_shim() {
-    jspi::blocking_call(glue_noop, ());
+    unsafe { jspi::blocking_call(glue_noop, ()) };
 }
 
 fn reentrant_denial() {
     let buf = [0x24u8; 128];
     black_box(&buf);
     let r = catch_unwind(|| {
-        jspi::blocking_call(reentrant_shim as extern "C-unwind" fn(), ());
+        unsafe { jspi::blocking_call(reentrant_shim as extern "C-unwind" fn(), ()) };
     });
     assert!(r.is_err(), "reentrant: expected nested bracket to panic");
     assert_eq!(buf, [0x24u8; 128], "reentrant: buffer corrupted by unwind");
@@ -70,7 +70,7 @@ fn plain_callback_discipline() {
         done();
     });
     call_plain_later(move || {
-        let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
+        let r = catch_unwind(|| unsafe { jspi::blocking_call(glue_sleep, (1.0,)) });
         assert!(
             r.is_err(),
             "plain-callback: expected blocking_call to panic from a plain activation"
@@ -201,7 +201,7 @@ fn value_fetch() {
 
 fn main() {
     // outside any scope: parity even, denied as a catchable panic
-    let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
+    let r = catch_unwind(|| unsafe { jspi::blocking_call(glue_sleep, (1.0,)) });
     assert!(
         r.is_err(),
         "expected blocking_call outside a scope to panic"

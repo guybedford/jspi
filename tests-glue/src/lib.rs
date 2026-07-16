@@ -178,14 +178,14 @@ pub fn init() {
 
 /// Park the calling activation for `ms` via a host timer.
 pub fn sleep(ms: f64) {
-    jspi::blocking_call(glue_sleep, (ms,));
+    unsafe { jspi::blocking_call(glue_sleep, (ms,)) };
 }
 
 /// Park the calling activation until the registered promise `pid` settles.
 /// Rejection is recorded in the JS registry; fetch with
 /// [`TestPromise::take_error`].
 pub fn await_pid(pid: u32) {
-    jspi::blocking_call(glue_await, (pid,));
+    unsafe { jspi::blocking_call(glue_await, (pid,)) };
 }
 
 /// A resolvable/rejectable JS promise handle in the test registry. The

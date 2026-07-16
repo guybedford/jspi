@@ -114,19 +114,23 @@ pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
 /// Bracket one foreign blocking call: save the live slice, call `f(args)`
 /// (the consumer's `__asyncjs__` Suspending import, parking until its
 /// promise settles), restore slice and stack pointer at the wasm resume
-/// boundary.
+/// boundary. Misplacement — outside an activation scope, from a plain host
+/// callback, reentrant — is denied by parity as a catchable panic before
+/// anything runs.
 ///
-/// Safe — the obligations rest with `f`'s declaration site: a genuine
-/// suspending import (or any non-suspending call: the bracket degrades to
-/// an identical-bytes no-op), unit return (type-enforced), no throw into
-/// the resume site, panics only before the suspension point (those unwind
-/// cleanly; after it is a contract violation, denied by abort).
-/// Misplacement is denied by parity as a catchable panic.
-pub fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A) {
+/// # Safety
+///
+/// The caller vouches for `f`: a genuine suspending import (or any
+/// non-suspending call, for which the bracket degrades to an
+/// identical-bytes no-op), unit return (type-enforced), never throwing
+/// into the resume site, and panicking only before its suspension point
+/// (those unwind cleanly through the bracket; after it is a contract
+/// violation, denied best-effort by abort).
+pub unsafe fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A) {
     let c = COUNTER.get();
     assert!(
         c & 1 == 1,
-        "jspi: blocking_call requires an open jspi::spawn scope with no \
+        "jspi: blocking_call requires an open activation scope with no \
          bracket in flight"
     );
     let (sp, top) = unsafe { (emscripten_stack_get_current(), emscripten_stack_get_base()) };

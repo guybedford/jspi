@@ -13,7 +13,7 @@ pub unsafe fn enter_promising<R>(_f: impl FnOnce() -> R + Send + 'static) -> R {
 
 /// Unsupported target: panics. See the emscripten implementation for the
 /// real contract.
-pub fn blocking_call<A: BlockingArgs>(_f: A::Fn, _args: A) {
+pub unsafe fn blocking_call<A: BlockingArgs>(_f: A::Fn, _args: A) {
     unsupported()
 }
 

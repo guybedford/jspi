@@ -21,8 +21,21 @@ See Hood Chatham's blog post on the Pyodid blog on this topic for more informati
 
 ## API
 
-We adopt Chatham's solution in simultaneously saving and restoring the LLVM
-shadow stack with Rust primitives that provide the following safe invariants:
+1. An `unsafe jspi::blocking_call(foreign_suspending_fn, (args,...,))`
+  which will handle storing and restoring the stack around a blocking JSPI
+  foreign JS function, including safe support for unwinds. Misplacement is
+  denied dynamically before anything runs; the `unsafe` is the caller
+  vouching for the foreign function itself — a genuine suspending import
+  (or non-suspending call), unit return, no throw into the resume site, no
+  panic after its suspension point.
+2. An `unsafe jspi::enter_promising(|| {})` activation scope, called as the
+  first statement of every promising-entered function. Its `'static + Send`
+  bound guarantees mutable borrows from outside the JSPI stack range are
+  never held across suspension points; its `unsafe` carries what types
+  cannot see — that the activation really is promising-entered, and that
+  the dependency tree tolerates multiple parked activations interleaving
+  under one shared `ThreadId` (no thread-identity-keyed reentrancy
+  assumptions).
 
 1. For `WebAssembly.promising` an `unsafe jspi::enter_promising(|| {})`
   scope which allows suspension. It is unsafe, because it may only be
