@@ -43,7 +43,7 @@ Supports nesting fine - blocked calls may in turn re-enter the runtime,
 execute their own `jspi::spawn` and `jspi::blocking_call` and these stacks
 will compose logically. Safety invariants are maintained.
 
-## Cavetas
+## Caveats
 
 - All `jspi::spawn` "threads" still share the same `ThreadId`. While still
   formally safe, blocking calls will interact with shared TLS, for example
