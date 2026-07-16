@@ -138,17 +138,18 @@ fn growth() {
 }
 
 fn main() {
-    // the safe full-capture root as the outermost activation root
-    jspi::spawn(|| {
-        assert!(
-            jspi::linked(),
-            "test requires -sJSPI and a JSPI-enabled host"
-        );
-        basic();
-        non_lifo();
-        same_tick_double_wake();
-        sequential_brackets();
-        growth();
-        println!("suspend tests passed");
-    })
+    unsafe {
+        jspi::enter_promising(|| {
+            assert!(
+                jspi::linked(),
+                "test requires -sJSPI and a JSPI-enabled host"
+            );
+            basic();
+            non_lifo();
+            same_tick_double_wake();
+            sequential_brackets();
+            growth();
+            println!("suspend tests passed");
+        })
+    }
 }

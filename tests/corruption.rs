@@ -22,41 +22,43 @@ fn scribble() {
 }
 
 fn main() {
-    jspi::spawn(|| {
-        assert!(
-            jspi::linked(),
-            "test requires -sJSPI and a JSPI-enabled host"
-        );
+    unsafe {
+        jspi::enter_promising(|| {
+            assert!(
+                jspi::linked(),
+                "test requires -sJSPI and a JSPI-enabled host"
+            );
 
-        let above = TestPromise::new();
-        let victim = TestPromise::new();
+            let above = TestPromise::new();
+            let victim = TestPromise::new();
 
-        // occupies the region just below main's park point, then exits,
-        // leaving the stack pointer reset above the victim
-        run_fiber(move || {
-            let pad = [0x44u8; 16];
-            black_box(&pad);
-            await_pid(above.0);
-        });
+            // occupies the region just below main's park point, then exits,
+            // leaving the stack pointer reset above the victim
+            run_fiber(move || {
+                let pad = [0x44u8; 16];
+                black_box(&pad);
+                await_pid(above.0);
+            });
 
-        // parks below `above` with a recognizable buffer
-        run_fiber(move || {
-            let buf = *VICTIM_DATA;
-            black_box(&buf);
-            await_pid(victim.0);
-            assert_eq!(&buf[..], &VICTIM_DATA[..], "victim stack corrupted");
-            VICTIM_OK.set(true);
-        });
+            // parks below `above` with a recognizable buffer
+            run_fiber(move || {
+                let buf = *VICTIM_DATA;
+                black_box(&buf);
+                await_pid(victim.0);
+                assert_eq!(&buf[..], &VICTIM_DATA[..], "victim stack corrupted");
+                VICTIM_OK.set(true);
+            });
 
-        sleep(10.0); // both parked
-        above.resolve();
-        sleep(10.0); // `above` exited; SP reset above the victim
-        call_plain_later(scribble);
-        sleep(10.0); // scribbler ran down through the victim's live range
-        victim.resolve();
-        sleep(10.0);
+            sleep(10.0); // both parked
+            above.resolve();
+            sleep(10.0); // `above` exited; SP reset above the victim
+            call_plain_later(scribble);
+            sleep(10.0); // scribbler ran down through the victim's live range
+            victim.resolve();
+            sleep(10.0);
 
-        assert!(VICTIM_OK.get(), "victim did not complete");
-        println!("corruption test passed");
-    })
+            assert!(VICTIM_OK.get(), "victim did not complete");
+            println!("corruption test passed");
+        })
+    }
 }

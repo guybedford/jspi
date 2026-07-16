@@ -244,13 +244,13 @@ impl Default for TestPromise {
 
 /// Run `f` on a fresh suspendable activation ("fiber"), entered from the
 /// host event loop through a promising-wrapped trampoline rooted in
-/// `jspi::spawn`. A panic escaping `f` crosses the promising boundary as a
-/// rejection and is rethrown on a fresh tick: fatal and loud.
+/// `jspi::enter_promising`. A panic escaping `f` crosses the promising
+/// boundary as a rejection and is rethrown on a fresh tick: fatal and loud.
 pub fn run_fiber(f: impl FnOnce() + Send + 'static) {
     anchor();
     extern "C-unwind" fn trampoline(data: *mut c_void) {
         let f = unsafe { Box::from_raw(data as *mut Box<dyn FnOnce() + Send>) };
-        jspi::spawn(|| f());
+        unsafe { jspi::enter_promising(|| f()) }
     }
     let data: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
     unsafe { glue_run_fiber(trampoline, Box::into_raw(data) as *mut c_void) }

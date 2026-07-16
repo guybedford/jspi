@@ -20,8 +20,11 @@ fn done() {
 // Parity denial: a scope nested inside a scope fails as a catchable panic;
 // the system stays fully operational afterwards.
 fn parity_denial() {
-    let r = catch_unwind(|| jspi::spawn(|| {}));
-    assert!(r.is_err(), "parity: expected nested spawn to panic");
+    let r = catch_unwind(|| unsafe { jspi::enter_promising(|| {}) });
+    assert!(
+        r.is_err(),
+        "parity: expected nested activation scope to panic"
+    );
     // a bracket inside the scope (even under catch_unwind) is legal
     let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
     assert!(r.is_ok(), "parity: bracket inside scope should work");
@@ -203,20 +206,22 @@ fn main() {
         r.is_err(),
         "expected blocking_call outside a scope to panic"
     );
-    jspi::spawn(|| {
-        assert!(
-            jspi::linked(),
-            "test requires -sJSPI and a JSPI-enabled host"
-        );
-        // non-suspending call: the bracket degrades to an identical-bytes
-        // no-op
-        jspi::blocking_call(glue_noop, ());
-        parity_denial();
-        reentrant_denial();
-        plain_callback_discipline();
-        panic_after_bracket();
-        park_during_unwind();
-        value_fetch();
-        println!("panic tests passed");
-    })
+    unsafe {
+        jspi::enter_promising(|| {
+            assert!(
+                jspi::linked(),
+                "test requires -sJSPI and a JSPI-enabled host"
+            );
+            // non-suspending call: the bracket degrades to an
+            // identical-bytes no-op
+            jspi::blocking_call(glue_noop, ());
+            parity_denial();
+            reentrant_denial();
+            plain_callback_discipline();
+            panic_after_bracket();
+            park_during_unwind();
+            value_fetch();
+            println!("panic tests passed");
+        })
+    }
 }

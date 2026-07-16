@@ -16,14 +16,16 @@
 //! stack discipline that makes this sound.
 //!
 //! ```ignore
-//! // in a promising-entered function (glue entry, or main itself —
-//! // -sJSPI auto-wraps main):
-//! jspi::spawn(|| {
-//!     // ordinary Rust; blocking_call parks this activation until the
-//!     // import's promise settles
-//!     jspi::blocking_call(glue_fetch, (url_ptr as usize, url_len));
-//!     let result = glue_take_result(); // plain import, post-restore
-//! })
+//! // first statement of a promising-entered function (glue entry, or
+//! // main itself — -sJSPI auto-wraps main):
+//! unsafe {
+//!     jspi::enter_promising(|| {
+//!         // ordinary Rust; blocking_call parks this activation until
+//!         // the import's promise settles
+//!         jspi::blocking_call(glue_fetch, (url_ptr as usize, url_len));
+//!         let result = glue_take_result(); // plain import, post-restore
+//!     })
+//! }
 //! ```
 //!
 //! **Healing invariant** (the correctness core): with eager save at every
@@ -45,12 +47,12 @@ pub use args::BlockingArgs;
 #[cfg(target_os = "emscripten")]
 mod emscripten;
 #[cfg(target_os = "emscripten")]
-pub use emscripten::{blocking_call, linked, spawn};
+pub use emscripten::{blocking_call, enter_promising, linked};
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::{blocking_call, linked, spawn};
+pub use unsupported::{blocking_call, enter_promising, linked};
 
 #[doc(hidden)]
 pub const fn __em_js_len(s: &str) -> usize {

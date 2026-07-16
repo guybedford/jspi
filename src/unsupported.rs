@@ -7,7 +7,7 @@ pub fn linked() -> bool {
 
 /// Unsupported target: panics. See the emscripten implementation for the
 /// real contract.
-pub fn spawn<R>(_f: impl FnOnce() -> R + Send + 'static) -> R {
+pub unsafe fn enter_promising<R>(_f: impl FnOnce() -> R + Send + 'static) -> R {
     unsupported()
 }
 

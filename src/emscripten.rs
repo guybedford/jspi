@@ -63,22 +63,42 @@ pub fn linked() -> bool {
     unsafe { jspi_linked() != 0 }
 }
 
-/// The activation scope: runs `f` immediately (synchronous, not a
-/// scheduler). Each [`blocking_call`] inside saves and restores the entire
-/// live stack from its save point to the stack base — nothing can be
-/// under-saved, so there is no placement contract. `Send + 'static`
-/// enforces capture discipline: no borrow from outside the JSPI stack
-/// range crosses a suspension point. Nesting is denied by parity as a
-/// catchable panic; suspending in a non-promising activation traps at the
-/// engine. All activations share one `ThreadId` and TLS: hold nothing
-/// across a bracket you would not hold across `epoll_wait`.
-pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
+/// The suspendable-activation scope: call as the first statement of a
+/// function entered from JS through `WebAssembly.promising` (glue entry,
+/// or main itself under `-sJSPI`); runs `f` immediately — synchronous, not
+/// a scheduler. Each [`blocking_call`] inside saves and restores the
+/// entire live stack from its save point to the stack base, so nothing can
+/// be under-saved: any call depth, no other placement requirement.
+///
+/// `Send + 'static` compiles away the lexical aliasing channel: no borrow
+/// from outside the scope can be held across a suspension point inside it
+/// (borrows created within the scope are inside the captured range and
+/// heal with everything else). Nesting is denied by parity as a catchable
+/// panic; a suspending call in an activation that was not actually
+/// promising-entered traps at the engine (loud, never corruption).
+///
+/// # Safety
+///
+/// The caller asserts what the types cannot see:
+///
+/// 1. This activation really was entered through `WebAssembly.promising`,
+///    and this scope spans it.
+/// 2. The multi-activation world: all activations share one `ThreadId` and
+///    one set of `thread_local!` instances, and parked activations
+///    interleave under that shared identity. The dependency tree must hold
+///    no thread-identity-keyed reentrancy assumptions (`RefCell` in shared
+///    state fails loud; identity-keyed locks do not). Hold nothing across
+///    a bracket you would not hold across `epoll_wait`.
+pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
     anchor();
     let c = COUNTER.get();
-    assert!(c & 1 == 0, "jspi: spawn nested inside an active scope");
+    assert!(
+        c & 1 == 0,
+        "jspi: enter_promising inside an open activation"
+    );
     COUNTER.set(c + 1);
-    // decrement on both exit paths so an unwinding closure cannot poison
-    // later activations
+    // decrement on both exit paths so an unwinding activation cannot
+    // poison later ones
     struct Exit;
     impl Drop for Exit {
         fn drop(&mut self) {
@@ -87,7 +107,7 @@ pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
     }
     let _exit = Exit;
     let r = f();
-    assert!(COUNTER.get() & 1 == 1, "jspi: scope parity corrupted");
+    assert!(COUNTER.get() & 1 == 1, "jspi: activation parity corrupted");
     r
 }
 
