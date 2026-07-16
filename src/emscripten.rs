@@ -28,12 +28,9 @@ unsafe extern "C" {
     fn emscripten_stack_get_base() -> usize;
     // compiler-rt stack_ops.S: frame-free at every opt level
     fn _emscripten_stack_restore(sp: usize);
+    // build-time ASYNCIFY setting: 0 none, 1 asyncify, 2 JSPI
+    fn emscripten_has_asyncify() -> i32;
 }
-
-crate::em_js_data!(
-    __em_js__jspi_linked,
-    "()<::>{ return (typeof Asyncify !== 'undefined' && !!Asyncify.makeAsyncFunction && typeof WebAssembly.promising === 'function') ? 1 : 0; }"
-);
 
 // The resume-boundary restore: zero wasm frames (wasm code would clobber or
 // be clobbered by the region it rewrites). HEAPU8 is refreshed on growth.
@@ -44,23 +41,18 @@ crate::em_js_data!(
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn jspi_linked() -> i32;
     fn jspi_restore(buf: usize, sp: usize, len: usize, set_sp: usize);
 }
 
 #[inline(never)]
 fn anchor() {
-    std::hint::black_box((
-        __em_js__jspi_linked.as_ptr(),
-        __em_js__jspi_restore.as_ptr(),
-    ));
+    std::hint::black_box(__em_js__jspi_restore.as_ptr());
 }
 
-/// Whether JSPI suspension is available: linked with `-sJSPI` on a
-/// supporting host.
+/// Whether this binary was linked with `-sJSPI` (a host without JSPI
+/// support fails at instantiation, before any wasm runs).
 pub fn linked() -> bool {
-    anchor();
-    unsafe { jspi_linked() != 0 }
+    unsafe { emscripten_has_asyncify() == 2 }
 }
 
 /// Creates a new JSPI promising scope.
