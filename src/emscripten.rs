@@ -1,208 +1,141 @@
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::ptr;
 
 use crate::BlockingArgs;
 
-/// Heap save-state for one parked bracket; heap and statics are never
-/// inside any saved slice.
-struct Meta {
-    sp: usize,
-    len: usize,
-    buf: Box<[MaybeUninit<u8>]>,
-}
-
-thread_local! {
-    /// Parity: parked activations hold scope + bracket = +2, invisible.
-    /// Even permits `spawn`; odd permits `blocking_call`.
-    static COUNTER: Cell<usize> = const { Cell::new(0) };
-    /// Parked save-state, keyed by frame probe address.
-    static REGISTRY: RefCell<Vec<(usize, Meta)>> = const { RefCell::new(Vec::new()) };
-    /// Meta transit across the restore instant: nothing may cross the
-    /// restore in a frame slot.
-    static IN_FLIGHT: Cell<Option<Meta>> = const { Cell::new(None) };
-}
-
 unsafe extern "C" {
-    fn emscripten_stack_get_current() -> usize;
     fn emscripten_stack_get_base() -> usize;
-    // compiler-rt stack_ops.S: frame-free at every opt level
+    fn emscripten_stack_get_current() -> usize;
     fn _emscripten_stack_restore(sp: usize);
 }
 
-crate::em_js_data!(
-    __em_js__jspi_linked,
-    "()<::>{ return (typeof Asyncify !== 'undefined' && !!Asyncify.makeAsyncFunction && typeof WebAssembly.promising === 'function') ? 1 : 0; }"
-);
+// WebAssembly stack shifts downwards towards 0
+// 
+// Stack ranges are thus of the form [TOP..BASE]
+// 
+// When suspension happens, we store the stack range from [TOP..JSPI_SUSPEND_TOP],
+// where JSPI_SUSPEND_TOP is the stack of stack tops populated by nested enter_promising
+// calls.
+// 
+// The stored stack is given a unique STACK_ID, and saved into the STACKS map for that ID.
+// 
+// Stacks may be resumed in arbitrary order. When resuming the saved stack is written
+// back into the stack, we do not implements Chatham's optimization for avoiding the copy.
+// 
+// See https://blog.pyodide.org/posts/jspi-with-c-runtime/ for more background.
+//
 
-// The resume-boundary restore: zero wasm frames (wasm code would clobber or
-// be clobbered by the region it rewrites). HEAPU8 is refreshed on growth.
-crate::em_js_data!(
-    __em_js__jspi_restore,
-    "(buf, sp, len, setSp)<::>{ wasmExports.__indirect_function_table.get(setSp)(sp); HEAPU8.copyWithin(sp, buf, buf + len); }"
-);
-
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn jspi_linked() -> i32;
-    fn jspi_restore(buf: usize, sp: usize, len: usize, set_sp: usize);
+thread_local! {
+    // Tracks the JSPI stack pointer of nested enter_promising
+    static JSPI_SUSPEND_TOP: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    // ID counter for stored stack
+    static STACK_ID: Cell<usize> = const { Cell::new(0) };
+    // Stores of the suspended JSPI stacks currently suspended, keyed by STACK_ID to (STACK_TOP, DATA)
+    static STACKS: RefCell<BTreeMap<usize, (usize, Box<[MaybeUninit<u8>]>)>> = const { RefCell::new(BTreeMap::new()) };
 }
 
-#[inline(never)]
-fn anchor() {
-    std::hint::black_box((
-        __em_js__jspi_linked.as_ptr(),
-        __em_js__jspi_restore.as_ptr(),
-    ));
-}
-
-/// Whether JSPI suspension is available: linked with `-sJSPI` on a
-/// supporting host.
-pub fn linked() -> bool {
-    anchor();
-    unsafe { jspi_linked() != 0 }
-}
-
-/// The suspendable-activation scope: call as the first statement of a
-/// function entered from JS through `WebAssembly.promising` (glue entry,
-/// or main itself under `-sJSPI`); runs `f` immediately — synchronous, not
-/// a scheduler. Each [`blocking_call`] inside saves and restores the
-/// entire live stack from its save point to the stack base, so nothing can
-/// be under-saved: any call depth, no other placement requirement.
+/// Creates a new JSPI promising scope.
 ///
-/// `Send + 'static` compiles away the lexical aliasing channel: no borrow
-/// from outside the scope can be held across a suspension point inside it
-/// (borrows created within the scope are inside the captured range and
-/// heal with everything else). Nesting is denied by parity as a catchable
-/// panic; a suspending call in an activation that was not actually
-/// promising-entered traps at the engine (loud, never corruption).
+/// `Send + 'static` ensures no borrow from outside the scope can be held
+/// across the blocking suspension points within it.
 ///
 /// # Safety
 ///
-/// The caller asserts what the types cannot see:
+/// The caller asserts that this is the first statement within a direct
+/// `WebAssembly.promising` function.
 ///
-/// 1. This activation really was entered through `WebAssembly.promising`,
-///    and this scope spans it.
-/// 2. The multi-activation world: all activations share one `ThreadId` and
-///    one set of `thread_local!` instances, and parked activations
-///    interleave under that shared identity. The dependency tree must hold
-///    no thread-identity-keyed reentrancy assumptions (`RefCell` in shared
-///    state fails loud; identity-keyed locks do not). Hold nothing across
-///    a bracket you would not hold across `epoll_wait`.
-pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    anchor();
-    let c = COUNTER.get();
-    assert!(
-        c & 1 == 0,
-        "jspi: enter_promising inside an open activation"
-    );
-    COUNTER.set(c + 1);
-    // decrement on both exit paths so an unwinding activation cannot
-    // poison later ones
-    struct Exit;
-    impl Drop for Exit {
-        fn drop(&mut self) {
-            COUNTER.set(COUNTER.get() - 1);
-        }
-    }
-    let _exit = Exit;
-    let r = f();
-    assert!(COUNTER.get() & 1 == 1, "jspi: activation parity corrupted");
-    r
+pub unsafe fn enter_promising<R>(f: impl FnOnce() + Send + 'static) {
+    let _stack = PromisingGuard::enter();
+    f();
 }
 
-/// Bracket one foreign blocking call: save the live slice, call `f(args)`
-/// (the consumer's `__asyncjs__` Suspending import, parking until its
-/// promise settles), restore slice and stack pointer at the wasm resume
-/// boundary. Misplacement — outside an activation scope, from a plain host
-/// callback, reentrant — is denied by parity as a catchable panic before
-/// anything runs.
+/// Perform a blocking JSPI suspending call
+///
+/// Supports arbitrary arity through the `BlockingArgs` generic on
+/// arbitrary tuple arguments.
 ///
 /// # Safety
 ///
-/// The caller vouches for `f`: a genuine suspending import (or any
-/// non-suspending call, for which the bracket degrades to an
-/// identical-bytes no-op), unit return (type-enforced), never throwing
-/// into the resume site, and panicking only before its suspension point
-/// (those unwind cleanly through the bracket; after it is a contract
-/// violation, denied best-effort by abort).
+/// Same as any foreign function in Rust.
+///
 pub unsafe fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A) {
-    let c = COUNTER.get();
-    assert!(
-        c & 1 == 1,
-        "jspi: blocking_call requires an open activation scope with no \
-         bracket in flight"
-    );
-    let (sp, top) = unsafe { (emscripten_stack_get_current(), emscripten_stack_get_base()) };
-    let len = top - sp;
-    let mut buf = Box::new_uninit_slice(len);
-    // save is atomic with the suspension: nothing interleaves before f
-    unsafe { ptr::copy_nonoverlapping(sp as *const MaybeUninit<u8>, buf.as_mut_ptr(), len) };
-    // key = fp + const: recomputable post-resume from the engine-preserved
-    // frame-pointer wasm local, no memory or SP-global read
-    let probe: u8 = 0;
-    let key = &raw const probe as usize;
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        assert!(
-            !r.iter().any(|(k, _)| *k == key),
-            "jspi: bracket key collision with a parked activation"
-        );
-        r.push((key, Meta { sp, len, buf }));
-    });
-    COUNTER.set(c + 1);
-
-    // Closes the bracket if a pre-suspension panic unwinds out of f
-    // (C-unwind). No restore: live memory is still the truth, and an SP
-    // write mid-unwind would land callee frames on the unwinder's. A
-    // post-resume panic is a contract violation: the key field is
-    // untrusted memory, validated against the registry — abort on miss.
-    struct UnwindClose {
-        key: usize,
-    }
-    impl Drop for UnwindClose {
-        fn drop(&mut self) {
-            let Some(meta) = registry_remove(self.key) else {
-                eprintln!("jspi: bracket unwound with unrecognized save-state");
-                std::process::abort();
-            };
-            drop(meta);
-            COUNTER.set(COUNTER.get() - 1);
-        }
-    }
-    let unwind_close = UnwindClose { key };
-
-    A::call(f, args); // parks; on resume SP and all of [sp, top) are untrusted
-
-    std::mem::forget(unwind_close);
-    let key = &raw const probe as usize;
-    let Some(meta) = registry_remove(key) else {
-        // unwinding over a still-scribbled frame is not an option
-        eprintln!("jspi: bracket save-state missing at resume boundary");
-        std::process::abort();
-    };
-    let (buf_ptr, sp, len) = (meta.buf.as_ptr() as usize, meta.sp, meta.len);
-    IN_FLIGHT.set(Some(meta));
-    // The restore rewrites this frame's own slots and sets SP := sp (this
-    // frame's base), so it must run here, not in a callee: a callee frame
-    // would sit below sp and be popped mid-execution by the SP write.
-    #[cfg(not(jspi_disable_virtualization))]
-    unsafe {
-        let set_sp: unsafe extern "C" fn(usize) = _emscripten_stack_restore;
-        jspi_restore(buf_ptr, sp, len, set_sp as usize);
-    }
-    #[cfg(jspi_disable_virtualization)]
-    let _ = (buf_ptr, sp, len);
-    // post-restore: static and heap reads only, frame slots fresh-only
-    drop(IN_FLIGHT.take());
-    COUNTER.set(COUNTER.get() - 1);
+    let _suspended_stack = SavedStack::suspend();
+    A::call(f, args);
 }
 
-fn registry_remove(key: usize) -> Option<Meta> {
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        r.iter()
-            .position(|(k, _)| *k == key)
-            .map(|i| r.swap_remove(i).1)
-    })
+
+/// PromisingGuard is used to capture the entry and exit of a WebAssembly.promising
+/// enter_promising call, to track the JSPI_SUSPEND_TOP stack created.
+/// The pushed value will be mutated by subsequent suspensions.
+struct PromisingGuard;
+
+impl PromisingGuard {
+    fn enter() -> PromisingGuard {
+        JSPI_SUSPEND_TOP.with(|ptr| {
+            ptr.borrow_mut()
+                .push(unsafe { emscripten_stack_get_current() })
+        });
+        PromisingGuard
+    }
+}
+
+impl Drop for PromisingGuard {
+    fn drop(&mut self) {
+        JSPI_SUSPEND_TOP.with(|ptr| ptr.borrow_mut().pop());
+    }
+}
+
+/// SavedStack is used to create a stack suspension for WebAssembly.Suspending
+/// function calls.
+/// 
+/// On resume, the JSPI_SUSPEND_TOP will be updated to the new stack top, before
+/// restoring the stack.
+struct SavedStack(usize);
+
+impl SavedStack {
+    fn suspend() -> SavedStack {
+        // Range is [TOP..BASE]
+        let suspend_range = unsafe {
+            emscripten_stack_get_current()
+                ..STACK_BASE
+                    .get()
+                    .expect("Expected to be in an enter_promising context")
+        };
+        let mut buf = Box::new_uninit_slice(suspend_range.len());
+        unsafe {
+            ptr::copy_nonoverlapping(
+                suspend_range.end as *const MaybeUninit<u8>,
+                buf.as_mut_ptr(),
+                suspend_range.len(),
+            );
+        }
+        let stack_id = STACK_ID.with(|id| {
+            let stack_id = id.get() + 1;
+            id.set(stack_id);
+            stack_id
+        });
+        // Restore the stack to the *base*
+        unsafe { _emscripten_stack_restore(suspend_range.end) };
+        STACKS.with(|stacks| stacks.borrow_mut().insert(stack_id, buf));
+        SavedStack(stack_id)
+    }
+}
+
+impl Drop for SavedStack {
+    fn drop(&mut self) {
+        let new_stack_top = unsafe { emscripten_stack_get_current() };
+        let buf = STACKS.with(|stacks| {
+            stacks
+                .borrow_mut()
+                .remove(&self.0)
+                .expect("Unable to find suspended stack on resume")
+        });
+        let low = new_stack_top - buf.len();
+        unsafe {
+            ptr::copy_nonoverlapping(buf.as_ptr(), low as *mut MaybeUninit<u8>, buf.len());
+            _emscripten_stack_restore(low);
+        }
+    }
 }

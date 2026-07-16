@@ -1,6 +1,6 @@
 # JSPI
 
-Safe JSPI primitives for Rust.
+Safe JSPI primitive for Rust.
 
 _Manages the Rust shadow stack for blocking JS operations._
 

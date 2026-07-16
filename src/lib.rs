@@ -1,5 +1,5 @@
-//! JSPI spill-stack primitives for `wasm32-unknown-emscripten`: safe
-//! blocking calls to async JavaScript from Rust, without stack corruption.
+//! JSPI spill-stack primitives for `wasm32-unknown-emscripten`.
+//! Safe blocking calls to async JavaScript from Rust, without stack corruption.
 //!
 //! JSPI (`WebAssembly.Suspending` / `WebAssembly.promising`) suspends the
 //! engine-managed native wasm stack per activation. LLVM-compiled code also
@@ -8,12 +8,6 @@
 //! suspended activations share one spill stack and one stack pointer, and
 //! silently corrupt each other unless every suspension saves its live slice
 //! and every resumption restores it.
-//!
-//! This crate is that eager save/restore convention reduced to primitives.
-//! **The foreign call is the Suspending thing** — consumers declare their
-//! own async imports (the `__asyncjs__` name prefix under `-sJSPI`) and call
-//! them directly through [`blocking_call`]; the crate supplies only the
-//! stack discipline that makes this sound.
 //!
 //! ```ignore
 //! // first statement of a promising-entered function (glue entry, or
@@ -27,13 +21,6 @@
 //!     })
 //! }
 //! ```
-//!
-//! **Healing invariant** (the correctness core): with eager save at every
-//! suspension and eager restoration at every resumption, arbitrary
-//! interleavings, non-LIFO wake orders, and overlapping activation ranges
-//! are correct. Whatever a sibling scribbles into a parked slice, the
-//! owner's own restore undoes before its code runs; only one activation
-//! executes at a time (resumes fire only from an empty native stack).
 
 #[cfg(all(target_os = "emscripten", target_feature = "atomics"))]
 compile_error!(
@@ -47,12 +34,12 @@ pub use args::BlockingArgs;
 #[cfg(target_os = "emscripten")]
 mod emscripten;
 #[cfg(target_os = "emscripten")]
-pub use emscripten::{blocking_call, enter_promising, linked};
+pub use emscripten::{blocking_call, enter_promising};
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::{blocking_call, enter_promising, linked};
+pub use unsupported::{blocking_call, enter_promising};
 
 #[doc(hidden)]
 pub const fn __em_js_len(s: &str) -> usize {
