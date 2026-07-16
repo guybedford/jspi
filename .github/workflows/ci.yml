@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+      # after emsdk so node 26 (JSPI on by default) wins on PATH over emsdk's bundled node
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - run: rustup target add wasm32-unknown-emscripten
+      - uses: Swatinem/rust-cache@v2
+      - run: npm install -g chomp
+      - run: cargo fmt --check
+      - run: chomp test

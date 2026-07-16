@@ -1,0 +1,32 @@
+[package]
+name = "jspi"
+version = "0.0.1"
+edition = "2021"
+description = "Shared JSPI spill-stack model primitives for WebAssembly stack switching"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+members = ["tests-glue"]
+
+[features]
+# copy-load counters (saves/restores, bytes out/in) via jspi::metrics()
+metrics = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(jspi_disable_virtualization)"] }
+
+[dev-dependencies]
+jspi-test-glue = { path = "tests-glue" }
+
+[[test]]
+name = "suspend"
+harness = false
+
+[[test]]
+name = "corruption"
+harness = false
+
+[[test]]
+name = "panics"
+harness = false
