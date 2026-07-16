@@ -63,32 +63,16 @@ pub fn linked() -> bool {
     unsafe { jspi_linked() != 0 }
 }
 
-/// The suspendable-activation scope: call as the first statement of a
-/// function entered from JS through `WebAssembly.promising` (glue entry,
-/// or main itself under `-sJSPI`); runs `f` immediately — synchronous, not
-/// a scheduler. Each [`blocking_call`] inside saves and restores the
-/// entire live stack from its save point to the stack base, so nothing can
-/// be under-saved: any call depth, no other placement requirement.
+/// Creates a new JSPI promising scope.
 ///
-/// `Send + 'static` compiles away the lexical aliasing channel: no borrow
-/// from outside the scope can be held across a suspension point inside it
-/// (borrows created within the scope are inside the captured range and
-/// heal with everything else). Nesting is denied by parity as a catchable
-/// panic; a suspending call in an activation that was not actually
-/// promising-entered traps at the engine (loud, never corruption).
+/// `Send + 'static` ensures no borrow from outside the scope can be held
+/// across the blocking suspension points within it.
 ///
 /// # Safety
 ///
-/// The caller asserts what the types cannot see:
+/// The caller asserts that this is the first statement within a direct
+/// `WebAssembly.promising` function.
 ///
-/// 1. This activation really was entered through `WebAssembly.promising`,
-///    and this scope spans it.
-/// 2. The multi-activation world: all activations share one `ThreadId` and
-///    one set of `thread_local!` instances, and parked activations
-///    interleave under that shared identity. The dependency tree must hold
-///    no thread-identity-keyed reentrancy assumptions (`RefCell` in shared
-///    state fails loud; identity-keyed locks do not). Hold nothing across
-///    a bracket you would not hold across `epoll_wait`.
 pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
     anchor();
     let c = COUNTER.get();
