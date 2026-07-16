@@ -45,20 +45,12 @@ pub use args::BlockingArgs;
 #[cfg(target_os = "emscripten")]
 mod emscripten;
 #[cfg(target_os = "emscripten")]
-pub use emscripten::{blocking_call, linked, spawn, stack_root};
+pub use emscripten::{blocking_call, linked, spawn};
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::{blocking_call, linked, spawn, stack_root};
-
-/// Padding added to the stack pointer measured inside [`stack_root`]
-/// (clamped to the stack base) to cover the promising entry's own frame
-/// between its true entry stack pointer and the measurement point.
-/// Over-save above the true top is healed by the owner's restore;
-/// under-save is corruption — entry frames (including the root closure's
-/// captures) must stay thinner than this pad.
-pub const STACK_TOP_PAD: usize = 4096;
+pub use unsupported::{blocking_call, linked, spawn};
 
 #[doc(hidden)]
 pub const fn __em_js_len(s: &str) -> usize {

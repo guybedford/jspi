@@ -17,20 +17,14 @@ fn done() {
     DONE.set(DONE.get() + 1);
 }
 
-// Parity denial: blocking_call outside any root, and roots nested inside a
-// root, fail as catchable panics; the system stays fully operational
-// afterwards.
+// Parity denial: a scope nested inside a scope fails as a catchable panic;
+// the system stays fully operational afterwards.
 fn parity_denial() {
-    let r = catch_unwind(|| unsafe { jspi::stack_root(|| {}) });
-    assert!(r.is_err(), "parity: expected nested stack_root to panic");
     let r = catch_unwind(|| jspi::spawn(|| {}));
     assert!(r.is_err(), "parity: expected nested spawn to panic");
+    // a bracket inside the scope (even under catch_unwind) is legal
     let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
-    // denied not because of this closure's placement but because a bracket
-    // would nest: catch_unwind's frame is inside the root, parity is odd,
-    // and the call itself is legal — so this succeeds; the *outside any
-    // root* case is exercised in main before the root opens.
-    assert!(r.is_ok(), "parity: bracket inside root should work");
+    assert!(r.is_ok(), "parity: bracket inside scope should work");
     sleep(1.0);
 }
 
@@ -203,28 +197,26 @@ fn value_fetch() {
 }
 
 fn main() {
-    // outside any root: parity even, denied as a catchable panic
+    // outside any scope: parity even, denied as a catchable panic
     let r = catch_unwind(|| jspi::blocking_call(glue_sleep, (1.0,)));
     assert!(
         r.is_err(),
-        "expected blocking_call outside a stack_root to panic"
+        "expected blocking_call outside a scope to panic"
     );
-    unsafe {
-        jspi::stack_root(|| {
-            assert!(
-                jspi::linked(),
-                "test requires -sJSPI and a JSPI-enabled host"
-            );
-            // non-suspending call: the bracket degrades to an
-            // identical-bytes no-op
-            jspi::blocking_call(glue_noop, ());
-            parity_denial();
-            reentrant_denial();
-            plain_callback_discipline();
-            panic_after_bracket();
-            park_during_unwind();
-            value_fetch();
-            println!("panic tests passed");
-        })
-    }
+    jspi::spawn(|| {
+        assert!(
+            jspi::linked(),
+            "test requires -sJSPI and a JSPI-enabled host"
+        );
+        // non-suspending call: the bracket degrades to an identical-bytes
+        // no-op
+        jspi::blocking_call(glue_noop, ());
+        parity_denial();
+        reentrant_denial();
+        plain_callback_discipline();
+        panic_after_bracket();
+        park_during_unwind();
+        value_fetch();
+        println!("panic tests passed");
+    })
 }

@@ -243,41 +243,14 @@ impl Default for TestPromise {
 }
 
 /// Run `f` on a fresh suspendable activation ("fiber"), entered from the
-/// host event loop through a promising-wrapped trampoline whose first
-/// statement is `unsafe { jspi::stack_root(...) }`. A panic escaping `f`
-/// crosses the promising boundary as a rejection and is rethrown on a fresh
-/// tick: fatal and loud.
+/// host event loop through a promising-wrapped trampoline rooted in
+/// `jspi::spawn`. A panic escaping `f` crosses the promising boundary as a
+/// rejection and is rethrown on a fresh tick: fatal and loud.
 pub fn run_fiber(f: impl FnOnce() + Send + 'static) {
     anchor();
     extern "C-unwind" fn trampoline(data: *mut c_void) {
-        unsafe {
-            jspi::stack_root(|| {
-                let f = Box::from_raw(data as *mut Box<dyn FnOnce() + Send>);
-                f();
-            })
-        }
-    }
-    let data: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
-    unsafe { glue_run_fiber(trampoline, Box::into_raw(data) as *mut c_void) }
-}
-
-/// [`run_fiber`] on the safe full-capture root ([`jspi::spawn`]): the
-/// trampoline deliberately carries a fat entry frame (2 × `STACK_TOP_PAD`,
-/// pattern-checked) — a `stack_root` contract violation, healed under
-/// `spawn`'s save-to-base.
-pub fn run_fiber_full(f: impl FnOnce() + Send + 'static) {
-    anchor();
-    extern "C-unwind" fn trampoline(data: *mut c_void) {
-        let mut pad = [0u8; 2 * jspi::STACK_TOP_PAD];
-        pad.fill(0x6C);
-        std::hint::black_box(&mut pad);
         let f = unsafe { Box::from_raw(data as *mut Box<dyn FnOnce() + Send>) };
         jspi::spawn(|| f());
-        assert_eq!(
-            pad,
-            [0x6Cu8; 2 * jspi::STACK_TOP_PAD],
-            "run_fiber_full: fat entry frame corrupted"
-        );
     }
     let data: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
     unsafe { glue_run_fiber(trampoline, Box::into_raw(data) as *mut c_void) }

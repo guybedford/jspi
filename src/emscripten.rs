@@ -4,9 +4,8 @@ use std::ptr;
 
 use crate::BlockingArgs;
 
-/// Save-state for one parked bracket. Lives on the heap inside the static
-/// registry: statics and heap are never part of any saved slice, so both
-/// survive arbitrary sibling scribbling while the owner is parked.
+/// Heap save-state for one parked bracket; heap and statics are never
+/// inside any saved slice.
 struct Meta {
     sp: usize,
     len: usize,
@@ -14,24 +13,20 @@ struct Meta {
 }
 
 thread_local! {
-    /// Parity counter: every parked activation holds root + bracket
-    /// = +2, so parity always describes the running code. Even: `spawn`
-    /// permitted. Odd: `blocking_call` permitted.
+    /// Parity: parked activations hold scope + bracket = +2, invisible.
+    /// Even permits `spawn`; odd permits `blocking_call`.
     static COUNTER: Cell<usize> = const { Cell::new(0) };
-    /// Parked bracket save-state, keyed by the bracket's frame-derived
-    /// probe address.
+    /// Parked save-state, keyed by frame probe address.
     static REGISTRY: RefCell<Vec<(usize, Meta)>> = const { RefCell::new(Vec::new()) };
-    /// Holds the resuming bracket's `Meta` across the restore instant: the
-    /// restore rewrites `blocking_call`'s own frame slots, so nothing may
-    /// transit the restore in a local. Occupied only between the registry
-    /// removal and the post-restore take — no suspension point in between.
+    /// Meta transit across the restore instant: nothing may cross the
+    /// restore in a frame slot.
     static IN_FLIGHT: Cell<Option<Meta>> = const { Cell::new(None) };
 }
 
 unsafe extern "C" {
     fn emscripten_stack_get_current() -> usize;
     fn emscripten_stack_get_base() -> usize;
-    // compiler-rt stack_ops.S, hand-written and frame-free at every opt level
+    // compiler-rt stack_ops.S: frame-free at every opt level
     fn _emscripten_stack_restore(sp: usize);
 }
 
@@ -40,11 +35,8 @@ crate::em_js_data!(
     "()<::>{ return (typeof Asyncify !== 'undefined' && !!Asyncify.makeAsyncFunction && typeof WebAssembly.promising === 'function') ? 1 : 0; }"
 );
 
-// The true-resume-boundary restore. Runs zero wasm frames (wasm restore
-// code would clobber or be clobbered by the region it rewrites): sets the
-// stack pointer through the passed compiler-rt funcref, then copies the
-// slice back. HEAPU8 is module-scope in emscripten glue and refreshed on
-// memory growth.
+// The resume-boundary restore: zero wasm frames (wasm code would clobber or
+// be clobbered by the region it rewrites). HEAPU8 is refreshed on growth.
 crate::em_js_data!(
     __em_js__jspi_restore,
     "(buf, sp, len, setSp)<::>{ wasmExports.__indirect_function_table.get(setSp)(sp); HEAPU8.copyWithin(sp, buf, buf + len); }"
@@ -64,210 +56,112 @@ fn anchor() {
     ));
 }
 
-/// Whether JSPI suspension is available: binary linked with `-sJSPI` and
-/// host support present.
+/// Whether JSPI suspension is available: linked with `-sJSPI` on a
+/// supporting host.
 pub fn linked() -> bool {
     anchor();
     unsafe { jspi_linked() != 0 }
 }
 
-fn enter_root<R>(top: usize, f: impl FnOnce() -> R) -> R {
+/// The activation scope: runs `f` immediately (synchronous, not a
+/// scheduler). Each [`blocking_call`] inside saves and restores the entire
+/// live stack from its save point to the stack base — nothing can be
+/// under-saved, so there is no placement contract. `Send + 'static`
+/// enforces capture discipline: no borrow from outside the JSPI stack
+/// range crosses a suspension point. Nesting is denied by parity as a
+/// catchable panic; suspending in a non-promising activation traps at the
+/// engine. All activations share one `ThreadId` and TLS: hold nothing
+/// across a bracket you would not hold across `epoll_wait`.
+pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    anchor();
     let c = COUNTER.get();
-    assert!(
-        c & 1 == 0,
-        "jspi: activation root nested inside an active root"
-    );
+    assert!(c & 1 == 0, "jspi: spawn nested inside an active scope");
     COUNTER.set(c + 1);
-    // Decrement + top reset on both exit paths: a panic unwinding out of
-    // the closure fully unwinds the root instead of poisoning every
-    // subsequent activation.
-    struct RootExit;
-    impl Drop for RootExit {
+    // decrement on both exit paths so an unwinding closure cannot poison
+    // later activations
+    struct Exit;
+    impl Drop for Exit {
         fn drop(&mut self) {
             COUNTER.set(COUNTER.get() - 1);
-            TOP.set(SENTINEL);
         }
     }
-    let _exit = RootExit;
-    TOP.set(top);
+    let _exit = Exit;
     let r = f();
-    assert!(
-        COUNTER.get() & 1 == 1,
-        "jspi: parity corrupted during activation root"
-    );
+    assert!(COUNTER.get() & 1 == 1, "jspi: scope parity corrupted");
     r
 }
 
-/// The safe full-capture activation root: like [`stack_root`], but every
-/// bracket inside saves and restores the **entire** stack from the save
-/// point to the absolute stack base. Under-save is thereby impossible, so
-/// every `stack_root` contract disappears: no placement requirement, no
-/// thin-entry-frame requirement, any call depth. Everything above the save
-/// point at a resume belongs to parked activations (their own restore
-/// heals the stale rewrite) or to dead frames (harmless) — the same
-/// healing invariant, applied conservatively.
+/// Bracket one foreign blocking call: save the live slice, call `f(args)`
+/// (the consumer's `__asyncjs__` Suspending import, parking until its
+/// promise settles), restore slice and stack pointer at the wasm resume
+/// boundary.
 ///
-/// The `Send + 'static` bound asserts capture discipline: no borrow from
-/// outside the JSPI-managed stack range can be held across suspension
-/// points inside the scope (borrows created within it are inside the
-/// captured range and heal with everything else).
-///
-/// The price is copy volume: `O(sp → stack base)` bytes per park, both
-/// directions (bounded by `-sSTACK_SIZE`), instead of `stack_root`'s
-/// `O(live activation slice)`.
-///
-/// A synchronous scope, not a scheduler: runs `f` immediately. Parking in
-/// a non-promising activation still traps at the engine (fatal and loud,
-/// never corruption). `Send + 'static` are the safety properties: the
-/// closure's environment can hold no borrows, so nothing reachable from a
-/// suspended activation can be aliased by code the host runs during the
-/// suspension (reentrant roots, plain callbacks) — the threads framing,
-/// type-enforced at the safe entry. Residual to know about: all
-/// activations share one `ThreadId` and one set of `thread_local!`
-/// instances — treat a bracketed foreign call as a blocking syscall on a
-/// thread that shares TLS and thread identity with every other activation.
-pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    anchor();
-    enter_root(unsafe { emscripten_stack_get_base() }, f)
-}
-
-/// Mark the top of this activation's spill stack and run `f` immediately:
-/// a synchronous scope, not a scheduler. Every [`blocking_call`] made
-/// (transitively) inside `f` saves and restores the live slice up to this
-/// mark. The optimized root — [`spawn`] is the safe full-capture variant.
-///
-/// # Safety
-///
-/// 1. Must be the first statement of the top-level function of a
-///    suspendable activation — one entered through `WebAssembly.promising`.
-/// 2. The entry frame above it stays thin: `stack_root` records
-///    `SP + STACK_TOP_PAD` (clamped to the stack base) as the activation
-///    top; entry frames (including the closure's captures, which live
-///    there) fatter than the pad are a contract violation. Over-save is
-///    healed; under-save is corruption.
-/// 3. No nesting: one root per activation (denied by the parity counter as
-///    a panic).
-/// 4. By entering it, the caller asserts the dependency tree contains no
-///    thread-identity-keyed reentrancy assumptions — all activations share
-///    one `ThreadId` and one set of `thread_local!` instances, and
-///    interleaving under one `ThreadId` is what the root makes possible.
-pub unsafe fn stack_root<R>(f: impl FnOnce() -> R) -> R {
-    anchor();
-    let top = unsafe {
-        (emscripten_stack_get_current() + STACK_TOP_PAD).min(emscripten_stack_get_base())
-    };
-    enter_root(top, f)
-}
-
-/// Bracket one foreign blocking call: save the live slice `[sp, top)` to
-/// the heap, call `f(args)` (the consumer's `__asyncjs__` Suspending
-/// import, which parks the activation until its promise settles), restore
-/// slice and stack pointer at the wasm resume boundary.
-///
-/// Safe: the obligations rest with `f`'s author at its declaration site
-/// (edition-2024 `unsafe extern` blocks allow `safe fn` import
-/// declarations) — a genuine suspending import (or any non-suspending safe
-/// call, for which the bracket degrades to a benign identical-bytes no-op),
-/// returning unit (type-enforced), never throwing into the resume site, and
-/// panicking only before its suspension point (`C-unwind`: such a panic
-/// unwinds through the bracket, whose RAII close discards the untouched
-/// snapshot; a panic after the foreign import returns is a contract
-/// violation, denied best-effort by abort). Misplacement — outside a root,
-/// from a plain host callback, reentrantly — is denied by the parity
-/// counter as a catchable panic before anything runs.
+/// Safe — the obligations rest with `f`'s declaration site: a genuine
+/// suspending import (or any non-suspending call: the bracket degrades to
+/// an identical-bytes no-op), unit return (type-enforced), no throw into
+/// the resume site, panics only before the suspension point (those unwind
+/// cleanly; after it is a contract violation, denied by abort).
+/// Misplacement is denied by parity as a catchable panic.
 pub fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A) {
     let c = COUNTER.get();
     assert!(
         c & 1 == 1,
-        "jspi: blocking_call requires an open stack_root with no bracket in \
-         flight (denied: outside any root, from a plain host callback, or \
-         reentrant)"
+        "jspi: blocking_call requires an open jspi::spawn scope with no \
+         bracket in flight"
     );
-    let top = TOP.get();
-    debug_assert_ne!(top, SENTINEL, "jspi: parity odd but no activation top");
-    let sp = unsafe { emscripten_stack_get_current() };
-    assert!(
-        sp <= top,
-        "jspi: stack pointer above the recorded activation top (stack_root \
-         contract violation)"
-    );
+    let (sp, top) = unsafe { (emscripten_stack_get_current(), emscripten_stack_get_base()) };
     let len = top - sp;
     let mut buf = Box::new_uninit_slice(len);
-    // Save is atomic with the suspension: nothing interleaves between this
-    // copy and the engine suspending inside the foreign import.
+    // save is atomic with the suspension: nothing interleaves before f
     unsafe { ptr::copy_nonoverlapping(sp as *const MaybeUninit<u8>, buf.as_mut_ptr(), len) };
-    // The registry key: the address of a local in this frame. Frame
-    // addresses derive from the frame-pointer wasm local — engine-preserved
-    // per activation — so recomputing this after the resume yields the
-    // identical value without any memory or SP-global read (the SP global
-    // holds whatever the last runner left at that point). The probe sits
-    // inside the saved slice and heals with everything else.
+    // key = fp + const: recomputable post-resume from the engine-preserved
+    // frame-pointer wasm local, no memory or SP-global read
     let probe: u8 = 0;
     let key = &raw const probe as usize;
     REGISTRY.with(|r| {
         let mut r = r.borrow_mut();
         assert!(
             !r.iter().any(|(k, _)| *k == key),
-            "jspi: bracket key collision: another parked activation's \
-             bracket frame occupies this frame address; alter the caller's \
-             frame geometry to avoid"
+            "jspi: bracket key collision with a parked activation"
         );
-        r.push((key, Meta { sp, len, top, buf }));
+        r.push((key, Meta { sp, len, buf }));
     });
     COUNTER.set(c + 1);
 
-    // Unwind path: `f` is `extern "C-unwind"` so pre-suspension panics
-    // (denial panics, consumer shim validation) unwind through the bracket
-    // with destructors. This guard closes the bracket during such an unwind
-    // *without* the restore: pre-suspension nothing else has run, so live
-    // memory is the truth and the snapshot is discardable — and the SP
-    // write would be a geometry error mid-unwind (the unwinder is executing
-    // in frames below the save point; SP := sp would let landing-pad
-    // callees allocate on top of them). A panic after the foreign import
-    // returns is a contract violation: the key field read from this frame
-    // is untrusted, so it is validated against the registry — best-effort
-    // abort on a miss, loud rather than corrupt.
+    // Closes the bracket if a pre-suspension panic unwinds out of f
+    // (C-unwind). No restore: live memory is still the truth, and an SP
+    // write mid-unwind would land callee frames on the unwinder's. A
+    // post-resume panic is a contract violation: the key field is
+    // untrusted memory, validated against the registry — abort on miss.
     struct UnwindClose {
         key: usize,
     }
     impl Drop for UnwindClose {
         fn drop(&mut self) {
             let Some(meta) = registry_remove(self.key) else {
-                eprintln!(
-                    "jspi: bracket unwound with unrecognized save-state \
-                     (panic after the foreign import returned?)"
-                );
+                eprintln!("jspi: bracket unwound with unrecognized save-state");
                 std::process::abort();
             };
-            TOP.set(meta.top);
             drop(meta);
             COUNTER.set(COUNTER.get() - 1);
         }
     }
     let unwind_close = UnwindClose { key };
 
-    A::call(f, args); // parks here; siblings run; engine resumes with an
-    // empty native stack, our wasm locals intact, and the SP global and
-    // every byte of [sp, top) untrusted.
+    A::call(f, args); // parks; on resume SP and all of [sp, top) are untrusted
 
     std::mem::forget(unwind_close);
-    // The resume-boundary close, inlined (load-bearing): the restore
-    // rewrites [sp, top) and sets SP := sp, so it must execute in the
-    // bracket frame itself — sp is this frame's own base, callees after the
-    // restore allocate below it. A separate call frame would sit below sp
-    // and be popped mid-execution by the SP write.
     let key = &raw const probe as usize;
     let Some(meta) = registry_remove(key) else {
-        // pre-restore: this frame is still sibling-scribbled, so unwinding
-        // here would run landing pads over garbage — abort
+        // unwinding over a still-scribbled frame is not an option
         eprintln!("jspi: bracket save-state missing at resume boundary");
         std::process::abort();
     };
     let (buf_ptr, sp, len) = (meta.buf.as_ptr() as usize, meta.sp, meta.len);
-    // Nothing may transit the restore in a local: the restore rewrites this
-    // frame's own slots with their pre-suspension bytes, so Meta parks in a
-    // static across the instant and is re-taken from it afterwards.
     IN_FLIGHT.set(Some(meta));
+    // The restore rewrites this frame's own slots and sets SP := sp (this
+    // frame's base), so it must run here, not in a callee: a callee frame
+    // would sit below sp and be popped mid-execution by the SP write.
     #[cfg(not(jspi_disable_virtualization))]
     unsafe {
         let set_sp: unsafe extern "C" fn(usize) = _emscripten_stack_restore;
@@ -275,11 +169,8 @@ pub fn blocking_call<A: BlockingArgs>(f: A::Fn, args: A) {
     }
     #[cfg(jspi_disable_virtualization)]
     let _ = (buf_ptr, sp, len);
-    let meta = IN_FLIGHT
-        .take()
-        .expect("jspi: in-flight save-state missing");
-    TOP.set(meta.top);
-    drop(meta);
+    // post-restore: static and heap reads only, frame slots fresh-only
+    drop(IN_FLIGHT.take());
     COUNTER.set(COUNTER.get() - 1);
 }
 

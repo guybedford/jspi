@@ -5,14 +5,12 @@
 use jspi_test_glue::{run_fiber, sleep};
 
 fn main() {
-    unsafe {
-        jspi::stack_root(|| {
-            assert!(jspi::linked());
-            run_fiber(|| {
-                sleep(30.0);
-                println!("marker:fiber-done");
-            });
-            println!("marker:main-done");
-        })
-    }
+    jspi::spawn(|| {
+        assert!(jspi::linked());
+        run_fiber(|| {
+            sleep(30.0);
+            println!("marker:fiber-done");
+        });
+        println!("marker:main-done");
+    })
 }
