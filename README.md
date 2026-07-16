@@ -45,6 +45,10 @@ unsafe {
 }
 ```
 
+_`jspi::enter_promising` must be the first Rust code to run inside of a
+`WebAssembly.Promising`-exported function. Rust aliasing guarantees only
+hold when this is the case._
+
 Link with `-C link-args=-sJSPI`. Run on a JSPI-enabled host (Node ≥ 26).
 
 Supports nesting fine - blocked calls may in turn re-enter the runtime,
