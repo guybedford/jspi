@@ -1,8 +1,11 @@
 [package]
-name = "jspi-test-glue"
+name = "jspi-test-module"
 version = "0.0.1"
 edition = "2024"
 publish = false
+
+[lib]
+name = "jspi_test_module"
 
 [dependencies]
 jspi = { path = ".." }

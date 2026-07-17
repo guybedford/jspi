@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::mem::MaybeUninit;
 use std::ptr;
 
-use crate::BlockingArgs;
+use crate::{BlockingArgs, EnterError};
 
 /// Heap save-state for one parked bracket; heap and statics are never
 /// inside any saved slice.
@@ -16,6 +16,9 @@ thread_local! {
     /// Parity: parked activations hold scope + bracket = +2, invisible.
     /// Even permits `spawn`; odd permits `blocking_call`.
     static COUNTER: Cell<usize> = const { Cell::new(0) };
+    /// The exclusive-owner bit: deliberately NOT part of COUNTER, so it
+    /// stays raised while the owner is parked — that is the whole point.
+    static EXCLUSIVE: Cell<bool> = const { Cell::new(false) };
     /// Parked save-state, keyed by frame probe address.
     static REGISTRY: RefCell<Vec<(usize, Meta)>> = const { RefCell::new(Vec::new()) };
     /// Meta transit across the restore instant: nothing may cross the
@@ -71,6 +74,13 @@ pub fn in_promising() -> bool {
     COUNTER.get() & 1 == 1
 }
 
+/// Whether an exclusive activation ([`enter_promising_exclusive`]) owns
+/// promising — including while it is parked. Distinct question from
+/// [`in_promising`]: the owner holds the lock across its suspensions.
+pub fn exclusive_promising() -> bool {
+    EXCLUSIVE.get()
+}
+
 /// The suspendable-activation scope: call as the first statement of a
 /// function entered from JS through `WebAssembly.promising` (glue entry,
 /// or main itself under `-sJSPI`); runs `f` immediately — synchronous, not
@@ -81,9 +91,12 @@ pub fn in_promising() -> bool {
 /// `Send + 'static` compiles away the lexical aliasing channel: no borrow
 /// from outside the scope can be held across a suspension point inside it
 /// (borrows created within the scope are inside the captured range and
-/// heal with everything else). Nesting is denied by parity as a catchable
-/// panic; a suspending call in an activation that was not actually
-/// promising-entered traps at the engine (loud, never corruption).
+/// heal with everything else). Denials are returned as [`EnterError`]
+/// before any user code runs: [`EnterError::Nested`] inside an open
+/// activation, [`EnterError::Exclusive`] while an
+/// [`enter_promising_exclusive`] owner holds promising. A suspending call
+/// in an activation that was not actually promising-entered traps at the
+/// engine (loud, never corruption).
 ///
 /// # Safety
 ///
@@ -97,26 +110,60 @@ pub fn in_promising() -> bool {
 ///    no thread-identity-keyed reentrancy assumptions (`RefCell` in shared
 ///    state fails loud; identity-keyed locks do not). Hold nothing across
 ///    a bracket you would not hold across `epoll_wait`.
-pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> R {
+pub unsafe fn enter_promising<R>(f: impl FnOnce() -> R + Send + 'static) -> Result<R, EnterError> {
+    enter(f, false)
+}
+
+/// [`enter_promising`] claiming exclusive ownership of promising for the
+/// activation's whole extent: the exclusive bit stays raised across the
+/// owner's suspensions (unlike the parity counter, which parks with it),
+/// so every other enter — including from host callbacks while the owner
+/// is parked — is denied with [`EnterError::Exclusive`] until the owner
+/// completes. Granted only from quiescence: an open activation denies
+/// with [`EnterError::Nested`], parked siblings with
+/// [`EnterError::Parked`] (already-parked activations would still
+/// interleave, so exclusivity could not be honored).
+///
+/// # Safety
+///
+/// Identical contract to [`enter_promising`].
+pub unsafe fn enter_promising_exclusive<R>(
+    f: impl FnOnce() -> R + Send + 'static,
+) -> Result<R, EnterError> {
+    enter(f, true)
+}
+
+fn enter<R>(f: impl FnOnce() -> R + Send + 'static, exclusive: bool) -> Result<R, EnterError> {
     anchor();
+    if EXCLUSIVE.get() {
+        return Err(EnterError::Exclusive);
+    }
     let c = COUNTER.get();
-    assert!(
-        c & 1 == 0,
-        "jspi: enter_promising inside an open activation"
-    );
+    if c & 1 == 1 {
+        return Err(EnterError::Nested);
+    }
+    if exclusive && c != 0 {
+        return Err(EnterError::Parked);
+    }
     COUNTER.set(c + 1);
-    // decrement on both exit paths so an unwinding activation cannot
+    EXCLUSIVE.set(exclusive);
+    // rebalance on both exit paths so an unwinding activation cannot
     // poison later ones
-    struct Exit;
+    struct Exit {
+        exclusive: bool,
+    }
     impl Drop for Exit {
         fn drop(&mut self) {
             COUNTER.set(COUNTER.get() - 1);
+            if self.exclusive {
+                EXCLUSIVE.set(false);
+            }
         }
     }
-    let _exit = Exit;
+    let _exit = Exit { exclusive };
     let r = f();
     assert!(COUNTER.get() & 1 == 1, "jspi: activation parity corrupted");
-    r
+    Ok(r)
 }
 
 /// Bracket one foreign blocking call: save the live slice, call `f(args)`

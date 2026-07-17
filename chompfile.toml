@@ -4,7 +4,8 @@ default-task = 'build'
 
 [env]
 CARGO_BUILD_TARGET = 'wasm32-unknown-emscripten'
-CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER = 'node'
+TEST_EXPORTS = '_main,_t_probe,_t_sleep_check,_t_park,_t_sequential,_t_value,_t_reject,_t_nested,_t_reentrant,_t_plain_denial,_t_noop_bracket,_t_grow,_t_scribble,_t_panic,_t_caught_panic,_t_park_during_unwind,_t_exclusive,_t_enter_check,_t_exclusive_check'
+TEST_LINK = '-Clink-arg=-sALLOW_MEMORY_GROWTH -Clink-arg=-sMODULARIZE -Clink-arg=-sEXPORTED_RUNTIME_METHODS=wasmExports'
 
 [[task]]
 name = 'build'
@@ -16,71 +17,44 @@ deps = [
     'test:debug',
     'test:release',
     'test:proof',
-    'test:panic-fatal',
-    'test:exit-runtime',
     'test:no-jspi',
-    'test:two-instance',
 ]
 
 # debug is load-bearing: -O0 spills all locals — the worst case for the
 # save-state transit kernel
 [[task]]
 name = 'test:debug'
-run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo test'
+run = '''
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI $TEST_LINK -Clink-arg=-sEXPORTED_FUNCTIONS=$TEST_EXPORTS" cargo build --example test_module || exit 1
+node tests/driver.cjs target/wasm32-unknown-emscripten/debug/examples/test_module.js
+'''
 
 [[task]]
 name = 'test:release'
-run = 'CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo test --release'
+run = '''
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI $TEST_LINK -Clink-arg=-sEXPORTED_FUNCTIONS=$TEST_EXPORTS" cargo build --release --example test_module || exit 1
+node tests/driver.cjs target/wasm32-unknown-emscripten/release/examples/test_module.js
+'''
 
-# prove the corruption test bites: with virtualization disabled it must fail
+# prove the corruption scenario bites: with virtualization disabled it must
+# NOT pass cleanly (assertion failure, rejection, or abort all count)
 [[task]]
 name = 'test:proof'
 run = '''
 export CARGO_TARGET_DIR=target/no-virtualize
-export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH --cfg jspi_disable_virtualization"
-cargo test --test corruption --no-run || exit 1
-if cargo test --test corruption 2>/dev/null; then
-  echo "ERROR: corruption test passed with virtualization disabled" && exit 1
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI $TEST_LINK -Clink-arg=-sEXPORTED_FUNCTIONS=$TEST_EXPORTS --cfg jspi_disable_virtualization" cargo build --example test_module || exit 1
+if node tests/driver.cjs --proof target/no-virtualize/wasm32-unknown-emscripten/debug/examples/test_module.js 2>/dev/null; then
+  echo "ERROR: corruption scenario passed with virtualization disabled" && exit 1
 else
-  echo "corruption test bites (failed as expected with virtualization disabled)"
+  echo "corruption scenario bites (failed as expected with virtualization disabled)"
 fi
 '''
 
-# an escaped fiber panic is fatal and loud: non-zero exit after main completed
-[[task]]
-name = 'test:panic-fatal'
-run = '''
-CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH" cargo build --example panic_fatal || exit 1
-if out=$(node target/wasm32-unknown-emscripten/debug/examples/panic_fatal.js 2>&1); then
-  echo "ERROR: escaped fiber panic exited 0" && exit 1
-fi
-echo "$out" | grep -q marker:main-done || { echo "ERROR: main did not complete"; exit 1; }
-echo "panic-fatal ok"
-'''
-
-# fibers parked at main-return must complete before the runtime exits
-[[task]]
-name = 'test:exit-runtime'
-run = '''
-out=$(CARGO_TARGET_DIR=target/exit-runtime CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH -Clink-arg=-sEXIT_RUNTIME=1" cargo run --example exit_runtime) || exit 1
-echo "$out" | grep -q marker:main-done || { echo "ERROR: main did not run"; exit 1; }
-echo "$out" | grep -q marker:fiber-done || { echo "ERROR: fiber did not complete after main returned under EXIT_RUNTIME=1"; exit 1; }
-echo "exit-runtime keepalive ok"
-'''
-
-# without -sJSPI: jspi_enabled() false, stack_root works, no-op bracket degrades
+# without -sJSPI: jspi_enabled() false, enters work, no-op bracket degrades
 [[task]]
 name = 'test:no-jspi'
 run = '''
-out=$(CARGO_TARGET_DIR=target/no-jspi CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sALLOW_MEMORY_GROWTH" cargo run --example no_jspi) || exit 1
-echo "$out" | grep -q marker:no-jspi-ok || { echo "ERROR: no-jspi run incomplete"; exit 1; }
-echo "no-jspi fallback ok"
-'''
-
-# two instances in one process: per-instance registry state must isolate
-[[task]]
-name = 'test:two-instance'
-run = '''
-CARGO_TARGET_DIR=target/two-instance CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-Clink-arg=-sJSPI -Clink-arg=-sALLOW_MEMORY_GROWTH -Clink-arg=-sMODULARIZE" cargo build --example two_instance || exit 1
-node scripts/two_instance_driver.cjs target/two-instance/wasm32-unknown-emscripten/debug/examples/two_instance.js
+export CARGO_TARGET_DIR=target/no-jspi
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="$TEST_LINK -Clink-arg=-sEXPORTED_FUNCTIONS=$TEST_EXPORTS" cargo build --example test_module || exit 1
+node tests/driver.cjs --no-jspi target/no-jspi/wasm32-unknown-emscripten/debug/examples/test_module.js
 '''

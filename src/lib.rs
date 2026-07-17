@@ -25,6 +25,7 @@
 //!         jspi::blocking_call(glue_fetch, (url_ptr as usize, url_len));
 //!         let result = glue_take_result(); // plain import, post-restore
 //!     })
+//!     .unwrap()
 //! }
 //! ```
 //!
@@ -44,15 +45,51 @@ compile_error!(
 mod args;
 pub use args::BlockingArgs;
 
+/// Denial reasons for [`enter_promising`] / [`enter_promising_exclusive`]:
+/// preconditions checked before any user code runs, returned as values so
+/// hosts can observe and route them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterError {
+    /// Attempted inside an already-open activation on this native stack.
+    Nested,
+    /// An exclusive activation owns promising ([`exclusive_promising`]).
+    Exclusive,
+    /// Exclusive entry denied: sibling activations are parked, so
+    /// exclusivity cannot be granted.
+    Parked,
+}
+
+impl std::fmt::Display for EnterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            EnterError::Nested => "jspi: enter inside an open activation",
+            EnterError::Exclusive => "jspi: an exclusive activation owns promising",
+            EnterError::Parked => "jspi: exclusive entry with parked activations",
+        })
+    }
+}
+
+impl std::error::Error for EnterError {}
+
 #[cfg(target_os = "emscripten")]
 mod emscripten;
 #[cfg(target_os = "emscripten")]
-pub use emscripten::{blocking_call, enter_promising, in_promising, jspi_enabled};
+pub use emscripten::{
+    blocking_call, enter_promising, enter_promising_exclusive, exclusive_promising, in_promising,
+    jspi_enabled,
+};
+#[cfg(target_os = "emscripten")]
+mod sleep;
+#[cfg(target_os = "emscripten")]
+pub use sleep::sleep;
 
 #[cfg(not(target_os = "emscripten"))]
 mod unsupported;
 #[cfg(not(target_os = "emscripten"))]
-pub use unsupported::{blocking_call, enter_promising, in_promising, jspi_enabled};
+pub use unsupported::{
+    blocking_call, enter_promising, enter_promising_exclusive, exclusive_promising, in_promising,
+    jspi_enabled, sleep,
+};
 
 #[doc(hidden)]
 pub const fn __em_js_len(s: &str) -> usize {

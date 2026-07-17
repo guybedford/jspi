@@ -7,22 +7,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
-members = ["tests-glue"]
+members = ["tests-module"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(jspi_disable_virtualization)"] }
 
 [dev-dependencies]
-jspi-test-glue = { path = "tests-glue" }
-
-[[test]]
-name = "corruption"
-harness = false
-
-[[test]]
-name = "suspend"
-harness = false
-
-[[test]]
-name = "panics"
-harness = false
+jspi-test-module = { path = "tests-module" }

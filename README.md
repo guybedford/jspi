@@ -26,11 +26,28 @@ See Hood Chatham's blog post on the Pyodid blog on this topic for more informati
   created as the first statement within a `WebAssembly.promising` function. It
   bounds the closure with `'static + Send` which guarantees that borrows
   outside the JSPI stack range are never held across suspension points.
+  Returns `Result<R, jspi::EnterError>`: denied with `EnterError::Nested`
+  inside an already-open activation, or `EnterError::Exclusive` while an
+  exclusive activation owns promising.
 1. For `WebAssembly.Suspending`, an `unsafe { jspi::blocking_call(foreign_suspending_fn, (args,...,))`
   wrapper fuction to handle saving and restoring the shadow stack before and
   after the call, including support for safe foreign unwinds. It can only be
   called from within a `jspi::enter_promising` closure, and is unsafe since
   like any other foreign function call.
+1. `unsafe jspi::enter_promising_exclusive(|| {})` — an `enter_promising`
+  that claims exclusive ownership of promising for the activation's whole
+  extent: the exclusive bit stays raised across the owner's suspensions, so
+  every other enter is denied with `EnterError::Exclusive` until the owner
+  completes (released on completion or unwind). Granted only from
+  quiescence: parked sibling activations deny it with `EnterError::Parked`.
+1. `jspi::in_promising()` / `jspi::exclusive_promising()` — two distinct
+  questions: is the currently executing code inside an open activation on
+  this native stack, and does an exclusive activation own promising
+  (including while it is parked). `jspi::jspi_enabled()` reports whether
+  the module was linked with `-sJSPI` on a supporting host.
+1. `unsafe jspi::sleep(duration)` — the one suspending import the crate
+  ships itself: parks the calling activation on a host timer via
+  `blocking_call`.
 
 ## Example
 
@@ -55,6 +72,7 @@ pub extern "C" fn promising_function(a: i32, b: i32) -> i32 {
 
           // ... safe Rust code...
       })
+      .unwrap()
   }
 }
 ```
@@ -75,3 +93,11 @@ these stacks will compose logically. Safety invariants are maintained.
 ## Testing
 
 `chomp test` (https://chompbuild.com/) runs all tests.
+
+The suite is JS-driven: `tests-module/` builds a single `-sMODULARIZE`
+Emscripten module of `t_*` exports, and `tests/driver.cjs` wraps them with
+`WebAssembly.promising` from node to drive genuine host-side reentrancy —
+overlapping parked entries, non-LIFO and same-tick wakes, plain-call
+discipline, exclusive ownership, escaped panics as rejections, and
+two-instance isolation — across debug, release, no-JSPI, and a
+corruption-proof lane (virtualization disabled, the scenario must fail).
