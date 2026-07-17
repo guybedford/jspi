@@ -7,7 +7,7 @@ use jspi_test_glue::{run_fiber, sleep};
 fn main() {
     unsafe {
         jspi::enter_promising(|| {
-            assert!(jspi::linked());
+            assert!(jspi::jspi_enabled());
             run_fiber(|| {
                 sleep(30.0);
                 println!("marker:fiber-done");

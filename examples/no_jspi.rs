@@ -1,4 +1,4 @@
-//! Built without -sJSPI by the chomp test:no-jspi task: linked() reports
+//! Built without -sJSPI by the chomp test:no-jspi task: jspi_enabled() reports
 //! false, the activation scope itself works (it suspends nothing), and a
 //! non-suspending blocking_call degrades to an identical-bytes no-op.
 
@@ -10,7 +10,10 @@ fn main() {
     jspi_test_glue::init();
     unsafe {
         jspi::enter_promising(|| {
-            assert!(!jspi::linked(), "expected linked() == false without -sJSPI");
+            assert!(
+                !jspi::jspi_enabled(),
+                "expected jspi_enabled() == false without -sJSPI"
+            );
             let buf = [0x42u8; 64];
             black_box(&buf);
             jspi::blocking_call(glue_noop, ());

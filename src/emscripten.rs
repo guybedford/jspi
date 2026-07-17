@@ -58,9 +58,17 @@ fn anchor() {
 
 /// Whether JSPI suspension is available: linked with `-sJSPI` on a
 /// supporting host.
-pub fn linked() -> bool {
+pub fn jspi_enabled() -> bool {
     anchor();
     unsafe { jspi_linked() != 0 }
+}
+
+/// Whether the currently executing code is inside an [`enter_promising`]
+/// scope (with no bracket in flight): a suspendable activation is open on
+/// this native stack and [`blocking_call`] is permitted. False from a
+/// plain host callback, even while a sibling activation is parked.
+pub fn in_promising() -> bool {
+    COUNTER.get() & 1 == 1
 }
 
 /// The suspendable-activation scope: call as the first statement of a

@@ -68,7 +68,7 @@ echo "$out" | grep -q marker:fiber-done || { echo "ERROR: fiber did not complete
 echo "exit-runtime keepalive ok"
 '''
 
-# without -sJSPI: linked() false, stack_root works, no-op bracket degrades
+# without -sJSPI: jspi_enabled() false, stack_root works, no-op bracket degrades
 [[task]]
 name = 'test:no-jspi'
 run = '''

@@ -209,7 +209,7 @@ fn main() {
     unsafe {
         jspi::enter_promising(|| {
             assert!(
-                jspi::linked(),
+                jspi::jspi_enabled(),
                 "test requires -sJSPI and a JSPI-enabled host"
             );
             // non-suspending call: the bracket degrades to an

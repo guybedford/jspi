@@ -1,7 +1,12 @@
 use crate::BlockingArgs;
 
 /// Always false: JSPI is only supported on `wasm32-unknown-emscripten`.
-pub fn linked() -> bool {
+pub fn jspi_enabled() -> bool {
+    false
+}
+
+/// Always false: JSPI is only supported on `wasm32-unknown-emscripten`.
+pub fn in_promising() -> bool {
     false
 }
 

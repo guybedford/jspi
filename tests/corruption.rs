@@ -25,7 +25,7 @@ fn main() {
     unsafe {
         jspi::enter_promising(|| {
             assert!(
-                jspi::linked(),
+                jspi::jspi_enabled(),
                 "test requires -sJSPI and a JSPI-enabled host"
             );
 
