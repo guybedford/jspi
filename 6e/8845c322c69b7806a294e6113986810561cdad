@@ -1,0 +1,29 @@
+examples/exit_runtime.rs
+  s_218a6a6822c60f::t_5c6ff745972067 10
+examples/panic_fatal.rs
+  s_218a6a6822c60f::t_cb9a9e381b553f 10
+examples/two_instance.rs
+  s_218a6a6822c60f::t_0f7b5f3fb3f4bd 14
+tests/corruption.rs
+  s_218a6a6822c60f::t_ce253cdc09cdf5 28
+tests/panics.rs
+  s_218a6a6822c60f::t_2f955f5be6eb73 212
+tests/suspend.rs
+  s_218a6a6822c60f::t_eacc169062069d 144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6e8845c322c69b7806a294e6113986810561cdad",
+  "prompts": {},
+  "sessions": {
+    "s_218a6a6822c60f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_09277eef2ffeKUeJUTKt2D0QzY",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Guy Bedford <gbedford@cloudflare.com>"
+    }
+  }
+}
